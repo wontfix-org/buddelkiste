@@ -17,7 +17,6 @@ import ipaddress
 import json
 import logging
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -36,6 +35,7 @@ from buddelkiste.dns_proxy import (
     nft_add_allow_ip,
 )
 from buddelkiste.features import lookup_executable_config
+from buddelkiste.which import which
 
 log = logging.getLogger(__name__)
 
@@ -501,10 +501,10 @@ def build_nft_ruleset(
 
 def find_net_helper() -> tuple[str, str]:
     """Return (kind, path) for pasta or slirp4netns."""
-    pasta = shutil.which("pasta")
+    pasta = which("pasta")
     if pasta:
         return "pasta", pasta
-    slirp = shutil.which("slirp4netns")
+    slirp = which("slirp4netns")
     if slirp:
         return "slirp4netns", slirp
     raise click.ClickException(
@@ -513,9 +513,9 @@ def find_net_helper() -> tuple[str, str]:
 
 
 def ensure_filter_tools() -> None:
-    if not shutil.which("nft"):
+    if not which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
-    if not shutil.which("setpriv"):
+    if not which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
     find_net_helper()
 
@@ -557,9 +557,8 @@ def apply_nft_ruleset(ruleset: str) -> None:
         capture_output=True,
     )
     if proc.returncode != 0:
-        raise click.ClickException(
-            f"failed to install nftables rules: {proc.stderr.strip() or proc.stdout.strip()}"
-        )
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise click.ClickException(f"failed to install nftables rules: {detail}")
 
 
 def start_slirp4netns(slirp_bin: str) -> subprocess.Popen:
@@ -624,9 +623,9 @@ def preseed_host_allows(hosts: Sequence[str]) -> None:
 
 def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp: bool) -> int:
     """Apply filter rules in the current netns, run optional DNS proxy, spawn bwrap."""
-    if not shutil.which("nft"):
+    if not which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
-    if not shutil.which("setpriv"):
+    if not which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
 
     slirp_proc = None
@@ -634,7 +633,7 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
     nsswitch_override: Path | None = None
     resolv_override: Path | None = None
     if start_slirp:
-        slirp_bin = shutil.which("slirp4netns")
+        slirp_bin = which("slirp4netns")
         if not slirp_bin:
             raise click.ClickException("slirp4netns is required for this network backend")
         slirp_proc = start_slirp4netns(slirp_bin)
@@ -815,7 +814,7 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             return subprocess.run(cmd, check=False).returncode
 
         # slirp4netns: create userns+netns, then inner starts slirp
-        if not shutil.which("unshare"):
+        if not which("unshare"):
             raise click.ClickException("network.mode=filter with slirp4netns requires unshare")
         cmd = [
             "unshare",
