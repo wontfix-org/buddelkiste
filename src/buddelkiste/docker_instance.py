@@ -35,7 +35,7 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
-from buddelkiste.which import which
+from buddelkiste.which import path_with_tools, which
 
 log = logging.getLogger(__name__)
 
@@ -47,16 +47,7 @@ _DAEMON_TOOLS = ("iptables", "ip6tables", "nft", "sysctl")
 
 def daemon_tool_path(base: str | None = None) -> str:
     """Return PATH for dockerd, including sbin when the tools live there."""
-    current = os.environ.get("PATH", "") if base is None else base
-    parts = [part for part in current.split(os.pathsep) if part]
-    for name in _DAEMON_TOOLS:
-        found = which(name, path=current)
-        if not found:
-            continue
-        directory = str(Path(found).parent)
-        if directory not in parts:
-            parts.insert(0, directory)
-    return os.pathsep.join(parts)
+    return path_with_tools(_DAEMON_TOOLS, base)
 
 
 FS_MODES = frozenset({"host", "project", "data"})
@@ -557,10 +548,14 @@ def daemon_bwrap_prefix(
     args: list[str] = [
         "bwrap",
         "--die-with-parent",
-        # bwrap drops all caps by default; dockerd/runc need them to mount
-        # sysfs/cgroup and set up container namespaces inside the userns.
+        # uid 0 already holds the userns capability set. --cap-add ALL replaces
+        # that set with every bit; capset() then fails with EPERM and bwrap
+        # leaves the inheritable set empty, so the exec cannot chown the
+        # engine socket. Naming one held cap makes capset() write the real
+        # set into inheritable and ambient. This is the same on bwrap 0.12
+        # and 0.13.
         "--cap-add",
-        "ALL",
+        "CAP_CHOWN",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -765,6 +760,24 @@ _AF_UNIX_PATH_MAX = 104
 _CONTAINERD_SOCK_TAIL = "e/containerd/containerd.sock.ttrpc"
 
 
+def _bwrap_off_apparmor_path(dest_dir: Path) -> Path:
+    """Copy ``bwrap`` off the path Debian's AppArmor profile attaches to.
+
+    The ``bwrap`` profile stacks every child onto ``unpriv_bwrap``, which
+    denies all capabilities. ``/proc/self/status`` can still show a full
+    ``CapEff`` while ``chown`` to another group and iptables fail with
+    EPERM. A copy is not path-attached, so the child keeps the user-namespace
+    capability set. Hosts without that profile run the same binary.
+    """
+    src = which("bwrap")
+    if src is None:
+        raise click.ClickException("bwrap not found")
+    dest = dest_dir / "bwrap"
+    shutil.copy2(src, dest)
+    dest.chmod(0o755)
+    return dest
+
+
 def _short_instance_base() -> Path:
     """Return a short directory for exec-root / sockets (AF_UNIX length limit)."""
     pid = os.getpid()
@@ -824,6 +837,11 @@ def docker_instance_setup(
         fs_allow=fs_allow,
         storage_driver=cfg.storage_driver,
     )
+    # Debian labels /usr/bin/bwrap. Children then run as unpriv_bwrap and lose
+    # every capability, including the chown dockerd needs for its socket group.
+    if "bwrap" in cmd:
+        bwrap_bin = _bwrap_off_apparmor_path(short_base)
+        cmd = [str(bwrap_bin) if part == "bwrap" else part for part in cmd]
     log.info("docker-instance starting: %s", " ".join(cmd))
     log_path = (runtime_dir or short_base) / "dockerd.log"
     log_file = log_path.open("wb")

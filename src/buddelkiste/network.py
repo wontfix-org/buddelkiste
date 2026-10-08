@@ -35,7 +35,7 @@ from buddelkiste.dns_proxy import (
     nft_add_allow_ip,
 )
 from buddelkiste.features import lookup_executable_config
-from buddelkiste.which import which
+from buddelkiste.which import path_with_tools, which
 
 log = logging.getLogger(__name__)
 
@@ -799,8 +799,19 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             str(net_file),
             str(bwrap_file),
         ]
+        # which() finds nft under /usr/sbin. The pasta child execs "nft" by
+        # name, so that directory has to be on its PATH. Arch already has it
+        # via the /usr/bin merge.
+        child_env = os.environ.copy()
+        child_env["PATH"] = path_with_tools(
+            ("nft", "setpriv", "ip"), child_env.get("PATH")
+        )
 
         if kind == "pasta":
+            # pasta's spawn execs the command from the new namespaces. Debian
+            # pasta 20250503 returns EACCES for a binary under a 0700 home
+            # (the venv interpreter). /bin/sh is executable by everyone and
+            # then execs the real argv, which newer pasta can do directly too.
             cmd = [
                 helper,
                 "--config-net",
@@ -808,10 +819,14 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                 "--map-host-loopback",
                 "none",
                 "--",
+                "/bin/sh",
+                "-c",
+                'exec "$@"',
+                "buddelkiste-pasta",
                 *inner,
             ]
             log.debug("launch pasta filter: %s", " ".join(cmd))
-            return subprocess.run(cmd, check=False).returncode
+            return subprocess.run(cmd, check=False, env=child_env).returncode
 
         # slirp4netns: create userns+netns, then inner starts slirp
         if not which("unshare"):
@@ -826,4 +841,4 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             "--start-slirp",
         ]
         log.debug("launch slirp filter: %s", " ".join(cmd))
-        return subprocess.run(cmd, check=False).returncode
+        return subprocess.run(cmd, check=False, env=child_env).returncode
