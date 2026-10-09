@@ -143,6 +143,7 @@ def cursor_binds() -> list:
         RWBindConfig(home / ".config/cursor"),
         RWBindConfig(home / ".cursor"),
         RWBindConfig(home / ".local/share/cursor"),
+        ROBindConfig(home / ".local/share/cursor-agent"),
         RWBindConfig(home / ".local/state/cursor"),
     ]
 
