@@ -88,3 +88,8 @@ src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 ignore = ["E501"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
