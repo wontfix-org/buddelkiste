@@ -3,7 +3,9 @@
 Modes:
   host   — share the host network (default; current behavior)
   none   — private empty netns (no connectivity)
-  filter — private netns via pasta/slirp4netns with in-namespace nftables
+  filter — private netns via pasta/slirp4netns with in-namespace nftables.
+           Default policy is allow (public egress). Private ranges and
+           loopback are denied.
 
 Filter mode needs no root and no host IP/subnet reservation. Rules accept
 IP/CIDR literals and hostnames (exact or ``*.suffix``). Hostnames are enforced
@@ -74,7 +76,7 @@ DEFAULT_DENY_PRESETS: tuple[str, ...] = ("internal", "localhost")
 @dataclass
 class NetworkConfig:
     mode: str = "filter"
-    policy: str = "deny"
+    policy: str = "allow"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
     deny_presets: list[str] = field(
@@ -238,7 +240,7 @@ def parse_network_table(
             f"Invalid network.mode {where}: {mode!r} (expected {', '.join(NETWORK_MODES)})"
         )
 
-    policy = data.get("policy", "deny")
+    policy = data.get("policy", "allow")
     if policy not in NETWORK_POLICIES:
         raise click.ClickException(
             f"Invalid network.policy {where}: {policy!r} "

@@ -53,14 +53,15 @@ Use `bk shims check` to detect originals that shadow those shims on PATH.
 Modes: filter (default; private netns via pasta or slirp4netns with
 in-namespace nftables IP/CIDR allow/deny), host (share host network), none
 (no connectivity). Filter mode needs no root and no reserved host subnets.
-By default filter also applies the ``internal`` and ``localhost`` deny presets
-(RFC1918/ULA and loopback). Host loopback is additionally blocked by
-pasta/slirp.
+Default policy is allow: public egress is accepted. The ``internal`` and
+``localhost`` deny presets drop private ranges (RFC1918/ULA) and loopback.
+Host loopback is additionally blocked by pasta/slirp. policy deny drops every
+destination that is not listed in allow.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
-keeps working under a default-deny policy. Rules may be IP/CIDR literals or
-hostnames (exact or *.suffix); hostnames use a DNS proxy that publishes
-resolved A/AAAA addresses into dynamic nft sets. Named deny presets (internal,
+keeps working under policy deny. Rules may be IP/CIDR literals or hostnames
+(exact or *.suffix); hostnames use a DNS proxy that publishes resolved
+A/AAAA addresses into dynamic nft sets. Named deny presets (internal,
 private, localhost, linklocal, metadata, plus custom names under
 [network.presets]) expand to IP/CIDR or hostname denials; see
 `bk list-net-presets`.
@@ -169,6 +170,7 @@ non-empty data_root needs prune first.
 \b
   [network]
   mode = "filter"
+  # Default is "allow" (public egress; private and loopback stay denied).
   policy = "deny"
   allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
   deny = ["203.0.113.0/24"]

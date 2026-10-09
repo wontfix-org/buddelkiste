@@ -61,7 +61,7 @@ def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
 def test_resolve_network_defaults() -> None:
     net = resolve_network({})
     assert net.mode == "filter"
-    assert net.policy == "deny"
+    assert net.policy == "allow"
     assert net.allow == []
     assert "10.0.0.0/8" in net.deny
     assert "127.0.0.0/8" in net.deny

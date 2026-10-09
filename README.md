@@ -32,7 +32,7 @@ bk shims check
 bk run --feature python --feature ssh python myscript.py
 bk run --feature cursor --feature gui cursor-agent
 
-# Network modes (filter is the default; denies internal + localhost)
+# Network modes (filter is the default; policy allow, denies private + localhost)
 bk run --network host …                 # share host network
 bk run --network none …                 # no connectivity
 bk run --network filter \
@@ -217,10 +217,10 @@ name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
 
 [network]
-# Defaults: mode = "filter", policy = "deny",
+# Defaults: mode = "filter", policy = "allow",
 # deny_presets = ["internal", "localhost"] (RFC1918/ULA + loopback).
 mode = "filter"
-policy = "deny"
+policy = "allow"
 allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
 deny = ["203.0.113.0/24"]
 deny_presets = ["internal", "localhost", "metadata", "linklocal", "corp"]
@@ -540,8 +540,11 @@ this private store. BuildKit via the Docker CLI also needs a working
 `network.mode = "filter"` needs **pasta** (from `passt`) or **slirp4netns**, plus
 **nft** and **setpriv**. No root and no reserved host subnets are required.
 Hostname rules start a DNS proxy that redirects UDP/53 and updates dynamic
-nftables allow sets from resolved A/AAAA records. Nameserver IPs from
-`/etc/resolv.conf` are auto-allowed under a default-deny policy.
+nftables allow sets from resolved A/AAAA records. Default policy is `allow`:
+public egress is accepted, and the `internal` and `localhost` deny presets
+drop private ranges (RFC1918/ULA) and loopback. `policy = "deny"` drops every
+destination that is not listed in allow. Nameserver IPs from
+`/etc/resolv.conf` are auto-allowed so DNS still works under that deny policy.
 
 ## Development
 

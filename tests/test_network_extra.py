@@ -108,6 +108,12 @@ def test_split_families_and_empty_nft_sets() -> None:
     assert v6 == ["2001:db8::/32"]
     rules = build_nft_ruleset(NetworkConfig(mode="filter", policy="deny"))
     assert "elements =" not in rules
+    assert "policy drop" in rules
+    default_rules = build_nft_ruleset(resolve_network({}))
+    assert "policy accept" in default_rules
+    assert "10.0.0.0/8" in default_rules
+    assert "192.168.0.0/16" in default_rules
+    assert "127.0.0.0/8" in default_rules
 
 
 def test_with_share_net_idempotent_and_without_unshare() -> None:

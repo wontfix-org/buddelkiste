@@ -50,7 +50,7 @@ def test_filter_denies_unlisted_ip(run_bk) -> None:
 
 @pytest.mark.requires_outbound
 def test_filter_default_policy_resolves_public_names(run_bk) -> None:
-    """Default deny must still resolve public names.
+    """Default allow must still resolve public names.
 
     A host resolv.conf that only lists the systemd-resolved stub (127.0.0.53)
     is not a usable resolver inside the pasta netns. ``bk run`` with no
@@ -67,6 +67,32 @@ def test_filter_default_policy_resolves_public_names(run_bk) -> None:
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert proc.stdout.strip()
+
+
+@pytest.mark.requires_outbound
+def test_filter_default_policy_connects_public_https(run_bk) -> None:
+    """Default filter must open TCP/443 to a public name.
+
+    Same path as ``curl --connect-timeout=3 https://www.heise.de`` inside
+    ``bk run`` with no extra allow rules: resolve IPv4, then connect.
+    Default policy is allow, so the public address is reachable. The internal
+    and localhost deny presets still drop private and loopback ranges.
+    """
+    proc = run_bk(
+        "--",
+        "/usr/bin/python3",
+        "-c",
+        "import socket\n"
+        "infos=socket.getaddrinfo("
+        "'www.heise.de', 443, family=socket.AF_INET, type=socket.SOCK_STREAM)\n"
+        "ip=infos[0][4][0]\n"
+        "print('IP:'+ip)\n"
+        "s=socket.create_connection((ip, 443), 3)\n"
+        "s.close()\n"
+        "print('OK')\n",
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "OK" in proc.stdout
 
 
 @pytest.mark.requires_outbound
