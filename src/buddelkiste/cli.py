@@ -164,21 +164,6 @@ non-empty data_root needs prune first.
   features = ["git", "ssh", "python", "rust"]
 
 \b
-  [feature.rust]
-  description = "Rust toolchain directories"
-  env = ["CARGO_HOME", "RUSTUP_HOME"]
-
-\b
-  [[feature.rust.binds]]
-  source = "$CARGO_HOME"
-  mode = "rw"
-
-\b
-  [[feature.rust.binds]]
-  source = "${HOME}/.rustup"
-  mode = "ro"
-
-\b
   [network]
   mode = "filter"
   policy = "deny"
