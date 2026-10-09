@@ -20,8 +20,9 @@ log = logging.getLogger(__name__)
 RUN_HELP = """Run a command inside a bubblewrap sandbox.
 
 Pass the executable and its arguments after any wrapper options. They are run
-inside the sandbox. Wrapper options are --debug, feature toggles, and network
-controls; everything else is forwarded as the sandboxed command.
+inside the sandbox. Wrapper options are --debug, feature toggles, network
+controls, and dbus-proxy filters; everything else is forwarded as the
+sandboxed command.
 
 With no command, a login shell is started inside the sandbox so the environment
 can be inspected.
@@ -62,6 +63,25 @@ resolved A/AAAA addresses into dynamic nft sets. Named deny presets (internal,
 private, localhost, linklocal, metadata, plus custom names under
 [network.presets]) expand to IP/CIDR or hostname denials; see
 `bk list-net-presets`.
+
+
+# D-Bus proxy
+
+The dbus-proxy feature exposes the session bus through xdg-dbus-proxy instead
+of the host socket (it conflicts with dbus). With no filter rules the proxy is
+unfiltered. Set any of see, talk, own, call, or broadcast — in [dbus_proxy],
+under executables.<name>.dbus_proxy, or with --dbus-see / --dbus-talk /
+--dbus-own / --dbus-call / --dbus-broadcast — to pass --filter and only those
+rules. CLI values append to the configured list for that key. An explicit
+empty list turns filtering on without rules of that kind.
+
+Names are well-known bus names; a .* suffix matches that name and its children
+(org.freedesktop.portal.* matches org.freedesktop.portal and
+org.freedesktop.portal.Desktop, not org.freedesktop.portalextra). talk implies
+see for that name; own implies talk and see. call and broadcast values are
+NAME=RULE, where RULE is [METHOD][@PATH]. METHOD is *, an interface,
+interface.*, or interface.member. PATH is an object path with an optional /*
+suffix.
 
 
 # Configuration
@@ -109,6 +129,13 @@ $XDG_CACHE_HOME/buddelkiste/overlays/<hash-of-source>), or
 envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
 "value" key. If no value is given, it is taken from the process environment.
+
+dbus_proxy: Optional table used by the dbus-proxy feature. Keys see, talk, own,
+call, and broadcast are lists of xdg-dbus-proxy rules. see/talk/own are
+well-known names (optional .* suffix). call and broadcast entries are
+NAME=RULE. Any key that is present enables --filter; CLI --dbus-* flags append.
+Per-executable executables.<name>.dbus_proxy overrides the same keys. With no
+rules the proxy is unfiltered.
 
 docker_proxy: Optional table used by the docker-proxy feature. Declares allowlisted
 images (and related policy) for the project. Host enforcement lives under
@@ -158,6 +185,16 @@ non-empty data_root needs prune first.
   allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
   deny = ["203.0.113.0/24"]
   deny_presets = ["metadata", "linklocal", "corp"]
+
+\b
+  [dbus_proxy]
+  talk = ["org.freedesktop.Notifications", "org.freedesktop.portal.*"]
+  call = ["org.freedesktop.portal.*=*"]
+  broadcast = ["org.freedesktop.portal.*=@/org/freedesktop/portal/*"]
+
+\b
+  [executables.cursor-agent.dbus_proxy]
+  own = ["org.example.MyApp"]
 
 \b
   [network.presets]
@@ -314,6 +351,41 @@ def cli() -> None:
     "the choice to dockerd. Overlay2 and fuse-overlayfs cannot share a "
     "data_root; prune before switching.",
 )
+@click.option(
+    "--dbus-see",
+    multiple=True,
+    metavar="NAME",
+    help="D-Bus name the sandbox may see (repeatable). Well-known name, "
+    "optional .* suffix. Enables dbus-proxy filtering.",
+)
+@click.option(
+    "--dbus-talk",
+    multiple=True,
+    metavar="NAME",
+    help="D-Bus name the sandbox may talk to (repeatable). Implies see for "
+    "that name. Enables dbus-proxy filtering.",
+)
+@click.option(
+    "--dbus-own",
+    multiple=True,
+    metavar="NAME",
+    help="D-Bus name the sandbox may own (repeatable). Implies talk and see. "
+    "Enables dbus-proxy filtering.",
+)
+@click.option(
+    "--dbus-call",
+    multiple=True,
+    metavar="NAME=RULE",
+    help="Allow method calls matching NAME=RULE (repeatable). RULE is "
+    "[METHOD][@PATH]. Enables dbus-proxy filtering.",
+)
+@click.option(
+    "--dbus-broadcast",
+    multiple=True,
+    metavar="NAME=RULE",
+    help="Allow broadcast signals matching NAME=RULE (repeatable). RULE is "
+    "[METHOD][@PATH]. Enables dbus-proxy filtering.",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -330,6 +402,11 @@ def run(
     net_deny_preset: tuple[str, ...],
     docker_instance_remove_data: bool | None,
     docker_instance_storage_driver: str | None,
+    dbus_see: tuple[str, ...],
+    dbus_talk: tuple[str, ...],
+    dbus_own: tuple[str, ...],
+    dbus_call: tuple[str, ...],
+    dbus_broadcast: tuple[str, ...],
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
@@ -362,12 +439,21 @@ def run(
 
     bind_args = get_bind_args(binds)
 
+    from buddelkiste.dbus_proxy import dbus_proxy_cli_context
     from buddelkiste.docker_instance import instance_cli_overrides
 
     with (
         instance_cli_overrides(
             remove_data_on_teardown=docker_instance_remove_data,
             storage_driver=docker_instance_storage_driver,
+        ),
+        dbus_proxy_cli_context(
+            executable=executable,
+            see=dbus_see,
+            talk=dbus_talk,
+            own=dbus_own,
+            call=dbus_call,
+            broadcast=dbus_broadcast,
         ),
         feature_setup(enabled, config) as setup_parts,
         project_config_hide_args(project_config) as hide_args,
@@ -726,6 +812,12 @@ def _merge_executables(base: dict, overlay: dict) -> dict:
                     and isinstance(entry.get("network"), dict)
                 ):
                     entry["network"] = _merge_network(entry["network"], value)
+                elif (
+                    key == "dbus_proxy"
+                    and isinstance(value, dict)
+                    and isinstance(entry.get("dbus_proxy"), dict)
+                ):
+                    entry["dbus_proxy"] = {**entry["dbus_proxy"], **value}
                 else:
                     entry[key] = value
             merged[name] = entry
@@ -738,8 +830,8 @@ def merge_config(base: dict, overlay: dict) -> dict:
     """Merge project config over user config.
 
     ``binds`` / ``envvars`` lists are concatenated. Nested ``feature``,
-    ``executables``, and ``network`` tables are merged (project wins on
-    conflicts). Other keys are replaced by the overlay value.
+    ``executables``, ``network``, and ``dbus_proxy`` tables are merged (project
+    wins on conflicts). Other keys are replaced by the overlay value.
     """
     result = dict(base)
     for key, value in overlay.items():
@@ -760,6 +852,11 @@ def merge_config(base: dict, overlay: dict) -> dict:
             existing = result.get("network")
             result["network"] = (
                 _merge_network(existing, value) if isinstance(existing, dict) else value
+            )
+        elif key == "dbus_proxy" and isinstance(value, dict):
+            existing = result.get("dbus_proxy")
+            result["dbus_proxy"] = (
+                {**existing, **value} if isinstance(existing, dict) else value
             )
         else:
             result[key] = value

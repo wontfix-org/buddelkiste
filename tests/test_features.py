@@ -405,6 +405,7 @@ def test_dbus_proxy_feature_setup(
         return proc
 
     monkeypatch.setattr("buddelkiste.features.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("buddelkiste.cli.load_config", dict)
 
     with dbus_proxy_setup() as setup_args:
         assert "--setenv" in setup_args
@@ -415,9 +416,9 @@ def test_dbus_proxy_feature_setup(
         assert "--ro-bind" in setup_args
         assert proxy_socket in setup_args
         assert captured["cmd"][2] == proxy_socket
-        assert "--filter" in captured["cmd"]
-        assert "--talk=*" in captured["cmd"]
-        assert "--own=*" in captured["cmd"]
+        assert "--filter" not in captured["cmd"]
+        assert "--talk=*" not in captured["cmd"]
+        assert "--own=*" not in captured["cmd"]
 
     proc = captured["proc"]
     proc.terminate.assert_called_once()

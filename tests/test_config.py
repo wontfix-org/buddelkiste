@@ -103,6 +103,35 @@ def test_merge_config_concatenates_lists_and_overrides_features() -> None:
     }
 
 
+def test_merge_config_merges_dbus_proxy_tables() -> None:
+    base = {
+        "dbus_proxy": {
+            "see": ["org.foo.Bar"],
+            "talk": ["org.foo.Baz"],
+        },
+        "executables": {
+            "python": {
+                "dbus_proxy": {"talk": ["org.python.App"], "own": ["org.python.Own"]},
+            },
+        },
+    }
+    overlay = {
+        "dbus_proxy": {"talk": ["org.project.Talk"]},
+        "executables": {
+            "python": {"dbus_proxy": {"own": ["org.project.Own"]}},
+        },
+    }
+    merged = merge_config(base, overlay)
+    assert merged["dbus_proxy"] == {
+        "see": ["org.foo.Bar"],
+        "talk": ["org.project.Talk"],
+    }
+    assert merged["executables"]["python"]["dbus_proxy"] == {
+        "talk": ["org.python.App"],
+        "own": ["org.project.Own"],
+    }
+
+
 def test_load_config_merges_project_over_user(
     tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

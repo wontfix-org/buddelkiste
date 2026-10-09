@@ -44,7 +44,8 @@ bk run --network filter \
 ```
 
 `bk run` wrapper options: `--debug`, `--feature` / `--no-feature`,
-`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`.
+`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`,
+`--dbus-see`, `--dbus-talk`, `--dbus-own`, `--dbus-call`, `--dbus-broadcast`.
 Everything else is the sandboxed command.
 
 ## Features
@@ -58,7 +59,7 @@ default; every other built-in is opt-in. Toggle with CLI flags or config; see
 | `asdf` | `~/.asdf`, `~/.tool-versions`, `ASDF_DIR` |
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
-| `dbus-proxy` | filtered session bus proxy via `xdg-dbus-proxy` (conflicts with `dbus`) |
+| `dbus-proxy` | session bus via `xdg-dbus-proxy`; optional see/talk/own/call/broadcast filter (conflicts with `dbus`) |
 | `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy` / `docker-instance`) |
 | `docker-proxy` | Filtered Docker API proxy + image allowlist (conflicts with `docker` / `docker-instance`) |
 | `docker-instance` | Project-local rootless dockerd + FS/net isolation (conflicts with `docker` / `docker-proxy`) |
@@ -94,6 +95,44 @@ bk run --feature ssh --feature git git fetch
 Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
 `--feature` / `--no-feature`.
+
+### D-Bus proxy
+
+`dbus-proxy` publishes a private session-bus socket from `xdg-dbus-proxy` and
+sets `DBUS_SESSION_BUS_ADDRESS` to it. It conflicts with `dbus`.
+
+With no rules the proxy is unfiltered (full session bus). `xdg-dbus-proxy`
+rejects a bare `*` name, so filtering is opt-in: set any of `see`, `talk`,
+`own`, `call`, or `broadcast` and the proxy is started with `--filter` and
+only those rules. An explicit empty list turns filtering on without rules of
+that kind.
+
+| Key | Flag | Value |
+|-----|------|--------|
+| `see` | `--see` / `--dbus-see` | well-known name the sandbox may see |
+| `talk` | `--talk` / `--dbus-talk` | name the sandbox may call (implies see) |
+| `own` | `--own` / `--dbus-own` | name the sandbox may own (implies talk and see) |
+| `call` | `--call` / `--dbus-call` | `NAME=RULE` for method calls |
+| `broadcast` | `--broadcast` / `--dbus-broadcast` | `NAME=RULE` for broadcast signals |
+
+Names may end in `.*` (`org.freedesktop.portal.*` matches
+`org.freedesktop.portal` and `org.freedesktop.portal.Desktop`, not
+`org.freedesktop.portalextra`). `RULE` is `[METHOD][@PATH]`: `METHOD` is `*`,
+an interface, `interface.*`, or `interface.member`; `PATH` is an object path
+with an optional `/*` suffix.
+
+Precedence for each key: global `[dbus_proxy]`, then the same key under
+`executables.<name>.dbus_proxy` (replaces that key), then repeatable CLI flags
+(appended).
+
+```bash
+bk run --feature dbus-proxy \
+  --dbus-talk org.freedesktop.Notifications \
+  --dbus-talk 'org.freedesktop.portal.*' \
+  --dbus-call 'org.freedesktop.portal.*=*' \
+  --dbus-broadcast 'org.freedesktop.portal.*=@/org/freedesktop/portal/*' \
+  cursor-agent
+```
 
 ### Config
 
@@ -132,6 +171,15 @@ args = ["--force"]
 mode = "filter"
 policy = "deny"
 allow = ["1.1.1.1/32", "api.github.com"]
+
+# Session-bus filter for the dbus-proxy feature (omit for an unfiltered proxy).
+[dbus_proxy]
+talk = ["org.freedesktop.Notifications", "org.freedesktop.portal.*"]
+call = ["org.freedesktop.portal.*=*"]
+broadcast = ["org.freedesktop.portal.*=@/org/freedesktop/portal/*"]
+
+[executables.cursor-agent.dbus_proxy]
+own = ["org.example.MyApp"]
 
 [executables.python]
 features = { python = true, git = true, gui = false }

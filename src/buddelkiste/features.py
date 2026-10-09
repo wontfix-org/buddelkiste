@@ -229,18 +229,21 @@ def dbus_proxy_setup() -> Iterator[Sequence[str]]:
             "dbus-proxy feature requires xdg-dbus-proxy in PATH"
         )
 
+    from buddelkiste.cli import load_config
+    from buddelkiste.dbus_proxy import dbus_proxy_command_args, resolve_dbus_proxy
+
+    policy = resolve_dbus_proxy(load_config())
     proxy_dir = Path(tempfile.mkdtemp(prefix="bkdbus", dir=runtime))
     proxy_socket = proxy_dir / "bus"
+    command = [
+        proxy_bin,
+        f"unix:path={session_bus}",
+        str(proxy_socket),
+        *dbus_proxy_command_args(policy),
+    ]
+    log.debug("xdg-dbus-proxy %s", command)
     proc = subprocess.Popen(
-        [
-            proxy_bin,
-            f"unix:path={session_bus}",
-            str(proxy_socket),
-            "--filter",
-            "--see=*",
-            "--talk=*",
-            "--own=*",
-        ],
+        command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -530,7 +533,7 @@ DBUS = Feature(
 )
 DBUS_PROXY = Feature(
     name="dbus-proxy",
-    description="Filtered D-Bus session access via xdg-dbus-proxy",
+    description="Session bus via xdg-dbus-proxy (see/talk/own/call/broadcast filter)",
     setup=dbus_proxy_setup,
     required_commands=("xdg-dbus-proxy",),
     conflicts_with=("dbus",),
