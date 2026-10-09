@@ -15,7 +15,7 @@ import signal
 import socket
 import subprocess
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -107,7 +107,7 @@ class InstanceStore:
 
 
 @contextmanager
-def instance_cli_overrides(**kwargs: Any) -> Iterator[None]:
+def instance_cli_overrides(**kwargs: Any) -> Generator[None]:
     """Apply ``bk run`` flags on top of ``[docker_instance]`` for this process."""
     filtered = {key: value for key, value in kwargs.items() if value is not None}
     token = _cli_overrides.set(filtered)
@@ -804,7 +804,7 @@ def docker_instance_setup(
     config: Mapping[str, Any] | None = None,
     instance: DockerInstanceConfig | None = None,
     runtime_dir: Path | None = None,
-) -> Iterator[Sequence[str]]:
+) -> Generator[Sequence[str]]:
     """Start project dockerd (+ optional proxy) and yield agent bwrap args."""
     check_rootless_prerequisites()
     cfg = instance or _apply_cli_overrides(load_instance_config(config))

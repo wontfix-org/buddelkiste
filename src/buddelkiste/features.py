@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -198,7 +198,7 @@ def docker_binds() -> list:
 
 
 @contextmanager
-def docker_proxy_feature_setup() -> Iterator[Sequence[str]]:
+def docker_proxy_feature_setup() -> Generator[Sequence[str]]:
     from buddelkiste.cli import load_config
     from buddelkiste.docker_proxy import docker_proxy_setup
 
@@ -207,7 +207,7 @@ def docker_proxy_feature_setup() -> Iterator[Sequence[str]]:
 
 
 @contextmanager
-def docker_instance_feature_setup() -> Iterator[Sequence[str]]:
+def docker_instance_feature_setup() -> Generator[Sequence[str]]:
     from buddelkiste.cli import load_config
     from buddelkiste.docker_instance import docker_instance_setup
 
@@ -216,7 +216,7 @@ def docker_instance_feature_setup() -> Iterator[Sequence[str]]:
 
 
 @contextmanager
-def dbus_proxy_setup() -> Iterator[Sequence[str]]:
+def dbus_proxy_setup() -> Generator[Sequence[str]]:
     runtime = _runtime()
     session_bus = runtime / "bus"
     if not session_bus.exists():
@@ -400,7 +400,7 @@ def find_sandbox_ssh_key() -> Path | None:
 
 
 @contextmanager
-def ssh_setup() -> Iterator[Sequence[str]]:
+def ssh_setup() -> Generator[Sequence[str]]:
     with SshAgent() as ssh_agent:
         assert ssh_agent.socket is not None
         if ssh_key := find_sandbox_ssh_key():
@@ -1009,7 +1009,7 @@ def feature_env_var_names(
 def feature_setup(
     enabled: dict[str, bool],
     config: dict | None = None,
-) -> Iterator[list[tuple[str, Sequence[str]]]]:
+) -> Generator[list[tuple[str, Sequence[str]]]]:
     """Run setup hooks for enabled features; yield ``(feature, bwrap args)`` parts."""
     registry = load_feature_registry(config or {})
     parts: list[tuple[str, Sequence[str]]] = []

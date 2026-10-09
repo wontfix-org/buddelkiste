@@ -9,7 +9,7 @@ import pwd
 import sys
 import tempfile
 import tomllib
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -854,7 +854,7 @@ def merge_config(base: dict, overlay: dict) -> dict:
 @contextmanager
 def project_config_hide_args(
     project_config: Path | None,
-) -> Iterator[list[str]]:
+) -> Generator[list[str]]:
     """Yield bwrap args that mask the project config with an empty file."""
     if project_config is None:
         yield []

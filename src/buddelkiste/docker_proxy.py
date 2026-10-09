@@ -24,7 +24,7 @@ import threading
 import time
 import tomllib
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -1320,7 +1320,7 @@ def docker_proxy_setup(
     config: Mapping[str, Any] | None = None,
     runtime_dir: Path | None = None,
     policy_key: str | None = None,
-) -> Iterator[Sequence[str]]:
+) -> Generator[Sequence[str]]:
     """Start the proxy and yield bwrap args that expose only the filtered socket."""
     docker_sock = resolve_docker_socket()
     if not docker_sock.exists():
