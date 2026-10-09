@@ -37,8 +37,9 @@ can add more). Toggle with --feature / --no-feature, or in config. Define
 pure-TOML features under [feature.<name>]. Use `bk list-features` to print the
 catalog (includes module paths).
 
-Config may set features globally and per executable (matched by path or
-basename of the command being started). A list selects exactly those features;
+Config may set features globally and per executable. The command may be a
+bare name or an absolute path; matching uses only the file name, not the
+directory. A list selects exactly those features;
 a table applies true/false overrides. Per-executable config may also set
 network and args (extra arguments appended to the command).
 
@@ -104,10 +105,12 @@ Before starting, bk refuses launches with conflicting mounts, conflicting
 --setenv values (host-forwarded or setup-defined), or mutually exclusive
 features.
 
-executables: Table keyed by executable path or basename. Each entry may contain
-a features list or table, a network table, an args list of extra arguments
-appended to the command, and/or a shim boolean (override the global shims
-toggle), applied when that executable is started.
+executables: Table keyed by executable file name. A path key is matched by its
+file name only, so the same entry applies to a bare command or any absolute
+path to that file. When several keys share a file name, the first one wins.
+Each entry may contain a features list or table, a network table, an args list
+of extra arguments appended to the command, and/or a shim boolean (override
+the global shims toggle), applied when that executable is started.
 
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an

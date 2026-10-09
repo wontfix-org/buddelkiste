@@ -100,15 +100,35 @@ def test_resolve_features_per_executable_list() -> None:
     assert by_basename["ssh"] is True
     assert by_basename["git"] is False
 
-    by_path = resolve_features(config, executable="/usr/bin/python")
-    assert by_path["python"] is True
-    assert by_path["git"] is True
-    assert by_path["cursor"] is False
+    # Path keys match by file name, including a different directory or a bare name.
+    for executable in ("/usr/bin/python", "/opt/python", "python"):
+        by_name = resolve_features(config, executable=executable)
+        assert by_name["python"] is True
+        assert by_name["git"] is True
+        assert by_name["cursor"] is False
+
+    other = resolve_features(config, executable="/usr/bin/python3")
+    assert other["python"] is False
+    assert other["git"] is True
 
     # No executable → global only (shell fallback).
     global_only = resolve_features(config, executable=None)
     assert global_only["git"] is True
     assert global_only["cursor"] is False
+
+
+def test_resolve_features_file_name_first_key_wins() -> None:
+    enabled = resolve_features(
+        {
+            "executables": {
+                "python": {"features": ["git"]},
+                "/usr/bin/python": {"features": ["python"]},
+            }
+        },
+        executable="/usr/bin/python",
+    )
+    assert enabled["git"] is True
+    assert enabled["python"] is False
 
 
 def test_resolve_features_per_executable_table_overrides_global() -> None:

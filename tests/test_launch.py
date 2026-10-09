@@ -44,18 +44,31 @@ def test_append_executable_args_by_basename() -> None:
     ) == ["/opt/bin/cursor-agent", "x", "--force", "--yolo"]
 
 
-def test_append_executable_args_by_path() -> None:
+def test_append_executable_args_matches_file_name_not_path() -> None:
     config = {
         "executables": {
             "/usr/bin/python": {"args": ["-u"]},
         }
     }
+    for executable in ("/usr/bin/python", "/opt/python", "python"):
+        assert append_executable_args(
+            [executable, "app.py"], config, executable
+        ) == [executable, "app.py", "-u"]
+    assert append_executable_args(
+        ["/usr/bin/python3", "app.py"], config, "/usr/bin/python3"
+    ) == ["/usr/bin/python3", "app.py"]
+
+
+def test_append_executable_args_file_name_first_key_wins() -> None:
+    config = {
+        "executables": {
+            "python": {"args": ["-B"]},
+            "/usr/bin/python": {"args": ["-u"]},
+        }
+    }
     assert append_executable_args(
         ["/usr/bin/python", "app.py"], config, "/usr/bin/python"
-    ) == ["/usr/bin/python", "app.py", "-u"]
-    assert append_executable_args(
-        ["python", "app.py"], config, "python"
-    ) == ["python", "app.py"]
+    ) == ["/usr/bin/python", "app.py", "-B"]
 
 
 def test_append_executable_args_noop_without_config() -> None:

@@ -901,7 +901,10 @@ def apply_feature_spec(
 def lookup_executable_config(config: dict, executable: str | None) -> dict | None:
     """Return the config table for an executable, if any.
 
-    Matches the full executable string first, then its basename.
+    The command may be a bare name or a path, including an absolute path.
+    Matching uses only the file name: ``/usr/bin/python`` and ``python`` both
+    select an entry whose key's file name is ``python``. The directory is
+    ignored. When several keys share a file name, the first one wins.
     """
     if not executable:
         return None
@@ -910,13 +913,13 @@ def lookup_executable_config(config: dict, executable: str | None) -> dict | Non
     if not isinstance(executables, dict):
         return None
 
-    if executable in executables:
-        entry = executables[executable]
-        return entry if isinstance(entry, dict) else None
+    name = Path(executable).name
+    if not name or name in {".", ".."}:
+        return None
 
-    basename = Path(executable).name
-    if basename in executables:
-        entry = executables[basename]
+    for key, entry in executables.items():
+        if Path(str(key)).name != name:
+            continue
         return entry if isinstance(entry, dict) else None
 
     return None
