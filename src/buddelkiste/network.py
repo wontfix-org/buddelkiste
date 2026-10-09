@@ -647,7 +647,11 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
 
-        use_proxy = net.needs_dns_proxy
+        # Hostname rules need the proxy so answers can update nft. A resolv.conf
+        # that only lists a loopback stub (systemd-resolved 127.0.0.53) leaves
+        # nameserver_ips() empty: that stub is unreachable with pasta's
+        # --map-host-loopback none, so use the same proxy and public fallbacks.
+        use_proxy = net.needs_dns_proxy or not upstreams
         if use_proxy:
             # Prefer public fallback resolvers first so slow/unreachable local
             # resolvers do not consume the query timeout budget before we reach

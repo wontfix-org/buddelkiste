@@ -244,8 +244,10 @@ def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
         "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
     )
-    monkeypatch.setattr("buddelkiste.network.resolv_conf_nameservers", list)
-    monkeypatch.setattr("buddelkiste.network.nameserver_ips", list)
+    monkeypatch.setattr(
+        "buddelkiste.network.resolv_conf_nameservers", lambda: ["9.9.9.9/32"]
+    )
+    monkeypatch.setattr("buddelkiste.network.nameserver_ips", lambda: ["9.9.9.9"])
     monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
     proc = MagicMock()
     proc.wait.return_value = 11
@@ -257,6 +259,53 @@ def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
         start_slirp=False,
     )
     assert code == 11
+
+
+def test_run_network_inner_stub_resolver_starts_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loopback-only resolv.conf must still install the DNS proxy."""
+    monkeypatch.setattr(
+        "buddelkiste.network.which",
+        lambda name: f"/bin/{name}",
+    )
+    monkeypatch.setattr(
+        "buddelkiste.network.resolv_conf_nameservers", lambda: ["127.0.0.53/32"]
+    )
+    monkeypatch.setattr("buddelkiste.network.nameserver_ips", list)
+    monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
+    monkeypatch.setattr("buddelkiste.network.preseed_host_allows", lambda hosts: None)
+
+    proxy = MagicMock(spec=DnsProxy)
+    created: dict = {}
+
+    def make_proxy(**kwargs):
+        created.update(kwargs)
+        return proxy
+
+    monkeypatch.setattr("buddelkiste.network.DnsProxy", make_proxy)
+    captured: dict = {}
+
+    def spawn(args):
+        captured["args"] = list(args)
+        src = args[args.index("/etc/resolv.conf") - 1]
+        captured["resolv"] = Path(src).read_text(encoding="utf-8")
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        return proc
+
+    monkeypatch.setattr("buddelkiste.network.spawn_bwrap_dropped", spawn)
+
+    code = run_network_inner(
+        NetworkConfig(mode="filter", policy="deny"),
+        ["bwrap", "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf", "--", "true"],
+        start_slirp=False,
+    )
+    assert code == 0
+    proxy.start.assert_called_once()
+    assert created["listen_port"] == 53
+    assert created["upstreams"][:2] == ["1.1.1.1", "8.8.8.8"]
+    assert "nameserver 127.0.0.1" in captured["resolv"]
 
 
 def test_run_network_inner_with_proxy_and_slirp(

@@ -49,6 +49,27 @@ def test_filter_denies_unlisted_ip(run_bk) -> None:
 
 
 @pytest.mark.requires_outbound
+def test_filter_default_policy_resolves_public_names(run_bk) -> None:
+    """Default deny must still resolve public names.
+
+    A host resolv.conf that only lists the systemd-resolved stub (127.0.0.53)
+    is not a usable resolver inside the pasta netns. ``bk run`` with no
+    hostname rules must still answer getaddrinfo for a public name.
+    """
+    proc = run_bk(
+        "--",
+        "/usr/bin/python3",
+        "-c",
+        "import socket; "
+        "infos=socket.getaddrinfo("
+        "'www.heise.de', 80, family=socket.AF_INET); "
+        "print(infos[0][4][0])",
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert proc.stdout.strip()
+
+
+@pytest.mark.requires_outbound
 def test_filter_hostname_allow_via_dns_proxy(run_bk) -> None:
     # Prefer IPv4: pasta filter netns often has no IPv6 route, so connecting to
     # the first getaddrinfo result (commonly AAAA) fails with ENETUNREACH.
