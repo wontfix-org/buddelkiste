@@ -61,10 +61,10 @@ destination that is not listed in allow.
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under policy deny. Rules may be IP/CIDR literals or hostnames
 (exact or *.suffix); hostnames use a DNS proxy that publishes resolved
-A/AAAA addresses into dynamic nft sets. Named deny presets (internal,
-private, localhost, linklocal, metadata, plus custom names under
-[network.presets]) expand to IP/CIDR or hostname denials; see
-`bk list-net-presets`.
+A/AAAA addresses into dynamic nft sets. Named presets (internal, private,
+localhost, linklocal, metadata, plus custom names under [network.presets])
+expand to IP/CIDR or hostname rules. Pass them with --net-allow-preset or
+--net-deny-preset; see `bk list-net-presets`.
 
 
 # D-Bus proxy
@@ -117,8 +117,9 @@ shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
 entry sets shim = true. Per-executable shim overrides this default.
 
-network: Global network settings (mode, policy, allow, deny, deny_presets).
-Optional [network.presets] defines custom named deny lists. See example.
+network: Global network settings (mode, policy, allow, deny, allow_presets,
+deny_presets). Optional [network.presets] defines custom named lists used by
+either allow_presets or deny_presets. See example.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
 and "mode" keys. The "source" key is mandatory and gives the host directory
@@ -175,6 +176,7 @@ non-empty data_root needs prune first.
   allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
   deny = ["203.0.113.0/24"]
   deny_presets = ["metadata", "linklocal", "corp"]
+  # allow_presets = ["metadata"]  # same names as deny_presets, added to allow
 
 \b
   [dbus_proxy]
@@ -320,6 +322,12 @@ def cli() -> None:
     help="Deny an IP/CIDR or hostname (implies --network filter; repeatable).",
 )
 @click.option(
+    "--net-allow-preset",
+    multiple=True,
+    help="Allow a named preset (built-in or from [network.presets]). "
+    "Implies --network filter. Repeatable. See `bk list-net-presets`.",
+)
+@click.option(
     "--net-deny-preset",
     multiple=True,
     help="Deny a named preset (built-in or from [network.presets]). "
@@ -389,6 +397,7 @@ def run(
     net_policy: str | None,
     net_allow: tuple[str, ...],
     net_deny: tuple[str, ...],
+    net_allow_preset: tuple[str, ...],
     net_deny_preset: tuple[str, ...],
     docker_instance_remove_data: bool | None,
     docker_instance_storage_driver: str | None,
@@ -420,6 +429,7 @@ def run(
         policy=net_policy,
         allow=net_allow,
         deny=net_deny,
+        allow_presets=net_allow_preset,
         deny_presets=net_deny_preset,
     )
     binds = get_binds(config, enabled)
@@ -489,7 +499,7 @@ def list_features() -> None:
 
 @cli.command("list-net-presets")
 def list_net_presets() -> None:
-    """List built-in and config network deny presets."""
+    """List built-in and config network presets."""
     click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
 
 

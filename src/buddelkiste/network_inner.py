@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
         deny=list(net_data.get("deny", [])),
         allow_hosts=list(net_data.get("allow_hosts", [])),
         deny_hosts=list(net_data.get("deny_hosts", [])),
+        allow_presets=list(net_data.get("allow_presets", [])),
         deny_presets=list(net_data.get("deny_presets", [])),
     )
     try:

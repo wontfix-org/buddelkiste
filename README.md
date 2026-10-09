@@ -44,7 +44,8 @@ bk run --network filter \
 ```
 
 `bk run` wrapper options: `--debug`, `--feature` / `--no-feature`,
-`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`,
+`--network`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
+`--net-deny`, `--net-deny-preset`,
 `--dbus-see`, `--dbus-talk`, `--dbus-own`, `--dbus-call`, `--dbus-broadcast`.
 Everything else is the sandboxed command.
 
@@ -224,6 +225,7 @@ policy = "allow"
 allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
 deny = ["203.0.113.0/24"]
 deny_presets = ["internal", "localhost", "metadata", "linklocal", "corp"]
+# allow_presets = ["metadata"]  # same preset names, added to allow
 
 [network.presets]
 corp = ["10.50.0.0/16", "*.internal.example.com"]

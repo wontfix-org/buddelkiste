@@ -53,6 +53,8 @@ def test_parse_network_table_validation() -> None:
         parse_network_table({"allow": "1.1.1.1"}, where="in config")
     with pytest.raises(click.ClickException, match="deny_presets"):
         parse_network_table({"deny_presets": "private"}, where="in config")
+    with pytest.raises(click.ClickException, match="allow_presets"):
+        parse_network_table({"allow_presets": "metadata"}, where="in config")
 
 
 def test_resolve_network_rejects_bad_cli_flags() -> None:

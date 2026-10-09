@@ -72,6 +72,7 @@ def test_resolve_network_implies_filter_from_cli_options() -> None:
     assert resolve_network({}, allow=["1.1.1.1/32"]).mode == "filter"
     assert resolve_network({}, deny=["10.0.0.0/8"]).mode == "filter"
     assert resolve_network({}, deny_presets=["metadata"]).mode == "filter"
+    assert resolve_network({}, allow_presets=["metadata"]).mode == "filter"
     assert resolve_network({}, policy="allow").mode == "filter"
 
 
@@ -83,6 +84,10 @@ def test_resolve_network_implies_filter_from_config_without_mode() -> None:
     presets = resolve_network({"network": {"deny_presets": ["private"]}})
     assert presets.mode == "filter"
     assert "10.0.0.0/8" in presets.deny
+
+    allowed = resolve_network({"network": {"allow_presets": ["metadata"]}})
+    assert allowed.mode == "filter"
+    assert "169.254.169.254/32" in allowed.allow
 
     policy_only = resolve_network({"network": {"policy": "allow"}})
     assert policy_only.mode == "filter"
@@ -109,6 +114,25 @@ def test_deny_presets_expand() -> None:
     assert "169.254.169.254/32" in expand_deny_presets(["metadata"])
     with pytest.raises(click.ClickException, match="Unknown network deny preset"):
         expand_deny_presets(["nope"])
+
+
+def test_resolve_network_allow_presets() -> None:
+    net = resolve_network(
+        {
+            "network": {
+                "presets": {"corp": ["10.50.0.0/16", "vpn.example"]},
+            }
+        },
+        allow_presets=["metadata", "corp"],
+    )
+    assert net.mode == "filter"
+    assert "169.254.169.254/32" in net.allow
+    assert "fd00:ec2::254/128" in net.allow
+    assert "10.50.0.0/16" in net.allow
+    assert "vpn.example" in net.allow_hosts
+    assert set(net.allow_presets) == {"metadata", "corp"}
+    with pytest.raises(click.ClickException, match="Unknown network allow preset"):
+        resolve_network({}, allow_presets=["nope"])
 
 
 def test_resolve_network_deny_presets() -> None:

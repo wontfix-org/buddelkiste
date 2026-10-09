@@ -79,6 +79,7 @@ class NetworkConfig:
     policy: str = "allow"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
+    allow_presets: list[str] = field(default_factory=list)
     deny_presets: list[str] = field(
         default_factory=lambda: list(DEFAULT_DENY_PRESETS)
     )
@@ -89,10 +90,27 @@ class NetworkConfig:
         self, registry: dict[str, tuple[str, ...]] | None = None
     ) -> NetworkConfig:
         presets_registry = registry if registry is not None else DENY_PRESETS
-        presets = validate_deny_presets(self.deny_presets, registry=presets_registry)
-        allow_cidrs, allow_hosts = split_targets(self.allow)
+        allow_presets = validate_deny_presets(
+            self.allow_presets, registry=presets_registry, kind="allow"
+        )
+        deny_presets = validate_deny_presets(
+            self.deny_presets, registry=presets_registry, kind="deny"
+        )
+        allow_cidrs, allow_hosts = split_targets(
+            [
+                *self.allow,
+                *expand_deny_presets(
+                    allow_presets, registry=presets_registry, kind="allow"
+                ),
+            ]
+        )
         deny_cidrs, deny_hosts = split_targets(
-            [*self.deny, *expand_deny_presets(presets, registry=presets_registry)]
+            [
+                *self.deny,
+                *expand_deny_presets(
+                    deny_presets, registry=presets_registry, kind="deny"
+                ),
+            ]
         )
         allow_hosts = list(dict.fromkeys([*allow_hosts, *self.allow_hosts]))
         deny_hosts = list(dict.fromkeys([*deny_hosts, *self.deny_hosts]))
@@ -101,7 +119,8 @@ class NetworkConfig:
             policy=self.policy,
             allow=allow_cidrs,
             deny=deny_cidrs,
-            deny_presets=presets,
+            allow_presets=allow_presets,
+            deny_presets=deny_presets,
             allow_hosts=allow_hosts,
             deny_hosts=deny_hosts,
         )
@@ -151,6 +170,7 @@ def validate_deny_presets(
     presets: Sequence[str],
     *,
     registry: dict[str, tuple[str, ...]] | None = None,
+    kind: str = "deny",
 ) -> list[str]:
     presets_registry = registry if registry is not None else DENY_PRESETS
     result: list[str] = []
@@ -158,7 +178,7 @@ def validate_deny_presets(
         if name not in presets_registry:
             known = ", ".join(presets_registry)
             raise click.ClickException(
-                f"Unknown network deny preset: {name!r} (expected {known})"
+                f"Unknown network {kind} preset: {name!r} (expected {known})"
             )
         if name not in result:
             result.append(name)
@@ -169,10 +189,11 @@ def expand_deny_presets(
     presets: Sequence[str],
     *,
     registry: dict[str, tuple[str, ...]] | None = None,
+    kind: str = "deny",
 ) -> list[str]:
     presets_registry = registry if registry is not None else DENY_PRESETS
     targets: list[str] = []
-    for name in validate_deny_presets(presets, registry=presets_registry):
+    for name in validate_deny_presets(presets, registry=presets_registry, kind=kind):
         targets.extend(presets_registry[name])
     return targets
 
@@ -181,7 +202,10 @@ def format_deny_presets_help(
     registry: dict[str, tuple[str, ...]] | None = None,
 ) -> str:
     presets_registry = registry if registry is not None else DENY_PRESETS
-    lines = ["Available network deny presets:", ""]
+    lines = [
+        "Available network presets (for --net-allow-preset or --net-deny-preset):",
+        "",
+    ]
     for name, targets in presets_registry.items():
         suffix = "" if name in DENY_PRESETS else " (custom)"
         body = ", ".join(targets) if targets else "(empty)"
@@ -249,6 +273,7 @@ def parse_network_table(
 
     allow = data.get("allow", [])
     deny = data.get("deny", [])
+    allow_presets = data.get("allow_presets", [])
     if "deny_presets" in data:
         deny_presets = data["deny_presets"]
     else:
@@ -256,6 +281,10 @@ def parse_network_table(
     if not isinstance(allow, list) or not isinstance(deny, list):
         raise click.ClickException(
             f"network.allow/deny {where} must be lists of IP/CIDR or hostname strings"
+        )
+    if not isinstance(allow_presets, list):
+        raise click.ClickException(
+            f"network.allow_presets {where} must be a list of preset names"
         )
     if not isinstance(deny_presets, list):
         raise click.ClickException(f"network.deny_presets {where} must be a list of preset names")
@@ -265,6 +294,7 @@ def parse_network_table(
         policy=policy,
         allow=[str(x) for x in allow],
         deny=[str(x) for x in deny],
+        allow_presets=[str(x) for x in allow_presets],
         deny_presets=[str(x) for x in deny_presets],
     )
     return cfg.normalized(registry)
@@ -282,7 +312,12 @@ def _config_requests_filter(network: dict | None) -> bool:
     """True when a config network table uses filtering knobs."""
     if not network:
         return False
-    if network.get("allow") or network.get("deny") or network.get("deny_presets"):
+    if (
+        network.get("allow")
+        or network.get("deny")
+        or network.get("allow_presets")
+        or network.get("deny_presets")
+    ):
         return True
     return "policy" in network
 
@@ -295,19 +330,22 @@ def resolve_network(
     policy: str | None = None,
     allow: Sequence[str] = (),
     deny: Sequence[str] = (),
+    allow_presets: Sequence[str] = (),
     deny_presets: Sequence[str] = (),
 ) -> NetworkConfig:
     """Resolve network settings.
 
     Precedence: defaults → global [network] → per-executable network → CLI flags.
-    CLI ``--net-allow`` / ``--net-deny`` / ``--net-deny-preset`` append to the
-    lists; ``--network`` / ``--net-policy`` override mode/policy when given.
+    CLI ``--net-allow`` / ``--net-deny`` / ``--net-allow-preset`` /
+    ``--net-deny-preset`` append to the lists; ``--network`` / ``--net-policy``
+    override mode/policy when given.
 
     Filter mode is selected automatically when filtering options are used, unless
     ``--network`` (or an explicit config ``mode``) chooses another mode.
 
-    Custom named deny presets may be defined under ``[network.presets]`` as
-    ``name = ["IP/CIDR or hostname", ...]`` and referenced like built-ins.
+    Custom named presets may be defined under ``[network.presets]`` as
+    ``name = ["IP/CIDR or hostname", ...]`` and referenced from either
+    allow_presets or deny_presets.
     """
     registry = load_deny_preset_registry(config)
     network_table = _effective_network_table(config, executable)
@@ -343,10 +381,14 @@ def resolve_network(
         net.allow.extend(allow)
     if deny:
         net.deny.extend(deny)
+    if allow_presets:
+        net.allow_presets.extend(allow_presets)
     if deny_presets:
         net.deny_presets.extend(deny_presets)
 
-    cli_filter = bool(policy is not None or allow or deny or deny_presets)
+    cli_filter = bool(
+        policy is not None or allow or deny or allow_presets or deny_presets
+    )
     if mode is None and (
         cli_filter or (not mode_from_config and _config_requests_filter(network_table))
     ):
@@ -791,6 +833,7 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                     "deny": net.deny,
                     "allow_hosts": net.allow_hosts,
                     "deny_hosts": net.deny_hosts,
+                    "allow_presets": net.allow_presets,
                     "deny_presets": net.deny_presets,
                 }
             ),

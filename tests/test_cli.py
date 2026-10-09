@@ -249,6 +249,26 @@ def test_cli_list_net_presets(tmp_config: Path) -> None:
     assert "custom" in result.output
 
 
+def test_cli_net_allow_preset(prepared_cwd: Path, fake_bwrap) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--no-feature",
+            "ssh",
+            "--network",
+            "filter",
+            "--net-allow-preset",
+            "metadata",
+            "/bin/true",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    net = fake_bwrap["nets"][0]
+    assert "169.254.169.254/32" in net.allow
+    assert "metadata" in net.allow_presets
+
+
 def test_cli_net_deny_preset(prepared_cwd: Path, fake_bwrap) -> None:
     result = CliRunner().invoke(
         cli,
