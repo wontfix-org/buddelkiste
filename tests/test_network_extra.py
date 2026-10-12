@@ -81,6 +81,17 @@ def test_resolv_conf_oserror_and_bad_ip(
     assert nameserver_ips(resolv) == ["8.8.8.8", "2001:db8::1"]
 
 
+def test_nameserver_ips_reads_systemd_uplink(tmp_path: Path) -> None:
+    stub = tmp_path / "stub.conf"
+    uplink = tmp_path / "uplink.conf"
+    stub.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    uplink.write_text(
+        "nameserver 172.16.0.1\nnameserver 1.1.1.1\nnameserver 172.16.0.1\n",
+        encoding="utf-8",
+    )
+    assert nameserver_ips(sources=[stub, uplink]) == ["172.16.0.1", "1.1.1.1"]
+
+
 def test_nameserver_ips_skips_non_host_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "buddelkiste.network.resolv_conf_nameservers",
@@ -247,7 +258,9 @@ def test_run_network_inner_requires_tools(monkeypatch: pytest.MonkeyPatch) -> No
         run_network_inner(NetworkConfig(mode="filter"), ["bwrap"], start_slirp=False)
 
 
-def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_network_inner_without_proxy(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setattr(
         "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
@@ -261,12 +274,16 @@ def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
     proc.wait.return_value = 11
     monkeypatch.setattr("buddelkiste.network.spawn_bwrap_dropped", lambda args: proc)
 
-    code = run_network_inner(
-        NetworkConfig(mode="filter", policy="deny", allow=["1.1.1.1/32"]),
-        ["bwrap", "--", "true"],
-        start_slirp=False,
-    )
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste.network"):
+        code = run_network_inner(
+            NetworkConfig(mode="filter", policy="deny", allow=["1.1.1.1/32"]),
+            ["bwrap", "--", "true"],
+            start_slirp=False,
+        )
     assert code == 11
+    assert "DNS proxy disabled upstreams=['9.9.9.9']" in caplog.text
 
 
 def test_run_network_inner_stub_resolver_starts_proxy(

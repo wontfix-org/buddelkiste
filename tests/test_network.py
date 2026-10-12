@@ -249,6 +249,14 @@ def test_build_nft_ruleset_allowlist() -> None:
     assert "8.8.8.8/32" in rules
     assert "169.254.169.254/32" in rules
     assert 'oifname "lo" accept' in rules
+    punched = build_nft_ruleset(
+        NetworkConfig(mode="filter", policy="allow", deny=["172.16.0.0/12"]),
+        dns_allow=["172.16.0.1/32"],
+    )
+    chain = punched.split("chain output", 1)[1]
+    assert chain.index("@dyn_allow4 accept") < chain.index("@deny4 drop")
+    assert chain.index("dport 53 accept") < chain.index("@deny4 drop")
+    assert "172.16.0.1/32" in punched
 
 
 def test_build_nft_ruleset_denylist_policy_allow() -> None:

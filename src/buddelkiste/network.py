@@ -421,8 +421,12 @@ def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
     return result
 
 
-def nameserver_ips(path: Path | None = None) -> list[str]:
-    """Bare nameserver addresses for DNS upstream forwarding."""
+# systemd-resolved writes the uplink servers here. /etc/resolv.conf is often
+# only the loopback stub (127.0.0.53), which cannot answer split-DNS names.
+_SYSTEMD_RESOLV_CONF = Path("/run/systemd/resolve/resolv.conf")
+
+
+def _nameserver_ips_from(path: Path) -> list[str]:
     ips: list[str] = []
     for cidr in resolv_conf_nameservers(path):
         net = ipaddress.ip_network(cidr, strict=False)
@@ -434,6 +438,27 @@ def nameserver_ips(path: Path | None = None) -> list[str]:
             if addr.is_loopback:
                 continue
             ips.append(str(addr))
+    return ips
+
+
+def nameserver_ips(
+    path: Path | None = None,
+    *,
+    sources: Sequence[Path] | None = None,
+) -> list[str]:
+    """Bare nameserver addresses for DNS upstream forwarding.
+
+    With no path, read /etc/resolv.conf and, when present, systemd-resolved's
+    uplink list. Loopback stubs are omitted.
+    """
+    if path is not None:
+        return _nameserver_ips_from(path)
+    paths = list(sources) if sources is not None else [Path("/etc/resolv.conf"), _SYSTEMD_RESOLV_CONF]
+    ips: list[str] = []
+    for source in paths:
+        for ip in _nameserver_ips_from(source):
+            if ip not in ips:
+                ips.append(ip)
     return ips
 
 
@@ -470,6 +495,7 @@ def build_nft_ruleset(
     net: NetworkConfig,
     *,
     extra_allow: Sequence[str] = (),
+    dns_allow: Sequence[str] = (),
     dns_proxy: bool = False,
 ) -> str:
     """Build an nftables ruleset for the sandbox netns."""
@@ -479,6 +505,7 @@ def build_nft_ruleset(
     deny = list(dict.fromkeys(net.deny))
     allow4, allow6 = split_families(allow)
     deny4, deny6 = split_families(deny)
+    dns4, dns6 = split_families(dns_allow)
 
     default_policy = "accept" if net.policy == "allow" else "drop"
 
@@ -506,6 +533,16 @@ def build_nft_ruleset(
         "    type ipv6_addr",
         "    flags timeout",
         "  }",
+        "  set dns4 {",
+        "    type ipv4_addr",
+        "    flags interval",
+        *( [f"    elements = {{ {set_elements(dns4)} }}"] if dns4 else [] ),
+        "  }",
+        "  set dns6 {",
+        "    type ipv6_addr",
+        "    flags interval",
+        *( [f"    elements = {{ {set_elements(dns6)} }}"] if dns6 else [] ),
+        "  }",
         "  set deny4 {",
         "    type ipv4_addr",
         "    flags interval",
@@ -520,12 +557,19 @@ def build_nft_ruleset(
         f"    type filter hook output priority 0; policy {default_policy};",
         "    oifname \"lo\" accept",
         "    ct state established,related accept",
+        # Nameserver and allow-host addresses are accepted before the private
+        # deny presets. Otherwise split-DNS resolvers and allowed names that
+        # live in RFC1918 are dropped even though policy allow would pass them.
+        "    ip daddr @dns4 tcp dport 53 accept",
+        "    ip daddr @dns4 udp dport 53 accept",
+        "    ip6 daddr @dns6 tcp dport 53 accept",
+        "    ip6 daddr @dns6 udp dport 53 accept",
+        "    ip daddr @dyn_allow4 accept",
+        "    ip6 daddr @dyn_allow6 accept",
         "    ip daddr @deny4 drop",
         "    ip6 daddr @deny6 drop",
         "    ip daddr @allow4 accept",
         "    ip6 daddr @allow6 accept",
-        "    ip daddr @dyn_allow4 accept",
-        "    ip6 daddr @dyn_allow6 accept",
         "  }",
     ]
     if dns_proxy:
@@ -697,20 +741,21 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
         # --map-host-loopback none, so use the same proxy and public fallbacks.
         use_proxy = net.needs_dns_proxy or not upstreams
         if use_proxy:
-            # Prefer public fallback resolvers first so slow/unreachable local
-            # resolvers do not consume the query timeout budget before we reach
-            # known-good upstreams.
+            # Host resolvers first so split-DNS names (corporate zones the
+            # public resolvers answer NXDOMAIN for) still resolve. Public
+            # resolvers are the fallback when a host resolver does not answer.
             fallback_upstreams = ("1.1.1.1", "8.8.8.8")
             ordered_upstreams: list[str] = []
-            for ip in fallback_upstreams:
-                if ip not in ordered_upstreams:
-                    ordered_upstreams.append(ip)
-                cidr = f"{ip}/32"
-                if cidr not in extra_allow:
-                    extra_allow.append(cidr)
             for ip in upstreams:
                 if ip not in ordered_upstreams:
                     ordered_upstreams.append(ip)
+            for ip in fallback_upstreams:
+                if ip not in ordered_upstreams:
+                    ordered_upstreams.append(ip)
+            for ip in ordered_upstreams:
+                cidr = f"{ip}/{32 if ':' not in ip else 128}"
+                if cidr not in extra_allow:
+                    extra_allow.append(cidr)
             upstreams = ordered_upstreams
 
             # Route sandbox hostname resolution into the DNS proxy reliably.
@@ -781,9 +826,15 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
                 proxy.start()
                 listen_port = DNS_PROXY_PORT
 
+        dns_allow = [f"{ip}/{32 if ':' not in ip else 128}" for ip in upstreams]
         ruleset = build_nft_ruleset(
-            net, extra_allow=extra_allow, dns_proxy=use_proxy and listen_port != 53
+            net,
+            extra_allow=extra_allow,
+            dns_allow=dns_allow,
+            dns_proxy=use_proxy and listen_port != 53,
         )
+        if not use_proxy:
+            log.debug("DNS proxy disabled upstreams=%s", upstreams)
         log.debug("nft ruleset:\n%s", ruleset)
         apply_nft_ruleset(ruleset)
         if use_proxy:

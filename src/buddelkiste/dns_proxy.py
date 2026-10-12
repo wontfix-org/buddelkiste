@@ -159,13 +159,23 @@ def _recvexact(sock: socket.socket, size: int) -> bytes | None:
     return bytes(chunks)
 
 
+def _rcode(message: bytes) -> int | None:
+    if len(message) < 4:
+        return None
+    return struct.unpack("!H", message[2:4])[0] & 0x000F
+
+
 def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 2.0) -> bytes | None:
     """Forward a DNS query to an upstream resolver.
 
     Uses DNS-over-TCP so upstream queries are not caught by the in-namespace
     nftables UDP/53 redirect that steers guest traffic to this proxy.
+
+    NXDOMAIN and SERVFAIL are not final: the next upstream is tried. A public
+    resolver often NXDOMAINs a split-DNS name that the host's resolver knows.
     """
     payload = struct.pack("!H", len(query)) + query
+    negative: bytes | None = None
     for upstream in upstreams:
         try:
             with socket.create_connection((upstream, 53), timeout=timeout) as sock:
@@ -180,11 +190,19 @@ def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 2.0) 
                     log.debug("DNS upstream %s returned invalid length %s", upstream, length)
                     continue
                 data = _recvexact(sock, length)
-                if data is not None:
-                    return data
-                log.debug("DNS upstream %s closed before full response body", upstream)
+                if data is None:
+                    log.debug("DNS upstream %s closed before full response body", upstream)
+                    continue
+                rcode = _rcode(data)
+                if rcode in (2, 3):
+                    log.debug("DNS upstream %s rcode %s; trying next", upstream, rcode)
+                    negative = data
+                    continue
+                return data
         except OSError as exc:
             log.debug("DNS upstream %s failed: %s", upstream, exc)
+    if negative is not None:
+        return negative
     if upstreams:
         log.warning(
             "all DNS upstreams failed (%s); answering NXDOMAIN",
@@ -226,7 +244,17 @@ class DnsProxy:
         self._sock = sock
         self._thread = threading.Thread(target=self._serve, name="buddelkiste-dns", daemon=True)
         self._thread.start()
-        log.debug("DNS proxy listening on %s:%s", self.listen_host, self.listen_port)
+        log.debug(
+            "DNS proxy config listen=%s:%s upstreams=%s allow_hosts=%s deny_hosts=%s "
+            "wildcards allow=%s deny=%s",
+            self.listen_host,
+            self.listen_port,
+            self.upstreams,
+            self.allow_hosts,
+            self.deny_hosts,
+            [host for host in self.allow_hosts if host.startswith("*.")],
+            [host for host in self.deny_hosts if host.startswith("*.")],
+        )
 
     def stop(self) -> None:
         self._stop.set()

@@ -483,8 +483,21 @@ def run(
 
         if debug:
             log_cmdline(bwrap_args)
-            log.debug("network mode=%s policy=%s allow=%s deny=%s",
-                      net.mode, net.policy, net.allow, net.deny)
+            log.debug(
+                "network mode=%s policy=%s allow=%s deny=%s allow_hosts=%s deny_hosts=%s",
+                net.mode,
+                net.policy,
+                net.allow,
+                net.deny,
+                net.allow_hosts,
+                net.deny_hosts,
+            )
+            log.debug(
+                "network wildcards allow=%s deny=%s",
+                [host for host in net.allow_hosts if host.startswith("*.")],
+                [host for host in net.deny_hosts if host.startswith("*.")],
+            )
+            os.environ["BUDDELKISTE_DEBUG"] = "1"
 
         exit_code = run_bwrap(bwrap_args, net)
 

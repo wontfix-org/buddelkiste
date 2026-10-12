@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +23,9 @@ def main(argv: list[str] | None = None) -> None:
     if len(argv) != 2:
         raise SystemExit("usage: python -m buddelkiste.network_inner NET.json BWRAP.json [--start-slirp]")
 
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(
+        level=logging.DEBUG if os.environ.get("BUDDELKISTE_DEBUG") else logging.WARNING
+    )
 
     net_data = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     bwrap_args = json.loads(Path(argv[1]).read_text(encoding="utf-8"))

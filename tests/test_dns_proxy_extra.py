@@ -179,6 +179,43 @@ def test_recvexact_and_forward_query_failures(monkeypatch: pytest.MonkeyPatch) -
     assert forward_query(_query("example.com"), ["1.1.1.1", "8.8.8.8", "9.9.9.9", "1.0.0.1"]) is None
 
 
+def test_forward_query_skips_nxdomain(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    class FakeConn:
+        def __init__(self, rcode: int) -> None:
+            flags = 0x8000 | rcode
+            body = struct.pack("!HHHHHH", 1, flags, 0, 0, 0, 0)
+            self._buf = struct.pack("!H", len(body)) + body
+
+        def settimeout(self, _t: float) -> None:
+            return None
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, n: int) -> bytes:
+            chunk = self._buf[:n]
+            self._buf = self._buf[n:]
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a: object) -> bool:
+            return False
+
+    def create_connection(address: tuple[str, int], timeout: float | None = None) -> FakeConn:
+        seen.append(address[0])
+        return FakeConn(3 if address[0] == "1.1.1.1" else 0)
+
+    monkeypatch.setattr(dns_proxy.socket, "create_connection", create_connection)
+    reply = forward_query(_query("gitlab.example"), ["1.1.1.1", "172.16.0.1"])
+    assert reply is not None
+    assert reply[3] & 0x0F == 0
+    assert seen == ["1.1.1.1", "172.16.0.1"]
+
+
 def test_dns_proxy_handle_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     allowed: list[tuple[str, int]] = []
 
@@ -228,6 +265,31 @@ def test_dns_proxy_handle_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(dns_proxy, "forward_query", lambda *a, **k: b"ok")
     assert bare._handle(_query("example.com")) == b"ok"
+
+
+def test_dns_proxy_start_logs_config(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sock = MagicMock()
+    sock.recvfrom.side_effect = OSError("closed")
+    monkeypatch.setattr(dns_proxy.socket, "socket", lambda *a, **k: sock)
+    proxy = DnsProxy(
+        upstreams=["1.1.1.1", "8.8.8.8"],
+        allow_hosts=["*.example.com", "exact.example"],
+        deny_hosts=["*.blocked.example"],
+        add_allow_ip=lambda *a: None,
+        listen_host="127.0.0.1",
+        listen_port=53,
+    )
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste.dns_proxy"):
+        proxy.start()
+    proxy.stop()
+    assert (
+        "DNS proxy config listen=127.0.0.1:53 upstreams=['1.1.1.1', '8.8.8.8'] "
+        "allow_hosts=['*.example.com', 'exact.example'] "
+        "deny_hosts=['*.blocked.example'] "
+        "wildcards allow=['*.example.com'] deny=['*.blocked.example']"
+    ) in caplog.text
 
 
 def test_dns_proxy_start_stop_and_serve(monkeypatch: pytest.MonkeyPatch) -> None:

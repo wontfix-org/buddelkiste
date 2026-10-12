@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import pwd
 from pathlib import Path
@@ -247,6 +248,35 @@ def test_cli_list_net_presets(tmp_config: Path) -> None:
     assert "metadata" in result.output
     assert "corp" in result.output
     assert "custom" in result.output
+
+
+def test_cli_debug_logs_wildcard_policy(
+    prepared_cwd: Path,
+    fake_bwrap,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste.cli"):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "run",
+                "--debug",
+                "--no-feature",
+                "ssh",
+                "--net-allow",
+                "*.example.com",
+                "--net-deny",
+                "exact.example",
+                "/bin/true",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert "network wildcards allow=['*.example.com'] deny=[]" in caplog.text
+    assert "allow_hosts=['*.example.com']" in caplog.text
+    assert "deny_hosts=['exact.example']" in caplog.text
+    assert os.environ.get("BUDDELKISTE_DEBUG") == "1"
 
 
 def test_cli_net_allow_preset(prepared_cwd: Path, fake_bwrap) -> None:
