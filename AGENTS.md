@@ -31,6 +31,17 @@ Do not commit with known ruff or ty failures. Extra args go after ``--``
 - Keep Co-authored-by trailers if the tooling already added them; do not
   invent trailers.
 
+Git does not wrap the message. A paragraph in the heredoc is one physical
+line, so break the subject and every body line at column 100 or earlier
+before ``git commit``. Draft into ``$msg``, then refuse to commit while any
+line is longer than 100 characters::
+
+   printf '%s\n' "$msg" | awk 'length($0) > 100 { print NR, length($0); bad=1 }
+   END { exit bad ? 1 : 0 }'
+
+Keep an existing Co-authored-by trailer on its own line at the end. Do not
+invent trailers. Pass the checked text with ``git commit -m "$msg"``.
+
 Example shape::
 
    Hold unknown docker-proxy images until CLI approve or deny.
