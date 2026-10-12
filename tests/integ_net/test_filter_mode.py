@@ -36,9 +36,8 @@ def test_filter_allows_listed_ip(run_bk) -> None:
 def test_filter_denies_unlisted_ip(run_bk) -> None:
     """Deny policy rejects a public address that is not on the allow list.
 
-    Default policy is allow, so this case has to opt into deny. 8.8.8.8 is
-    not a usable target: with a stub resolv.conf the DNS proxy treats it as
-    an upstream and auto-allows it. 9.9.9.9 is neither allowed nor a fallback.
+    Default policy is allow, so this case has to opt into deny. 9.9.9.9 is
+    not on the allow list.
     """
     proc = run_bk(
         "--net-policy",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import socket
 import struct
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from buddelkiste import dns_proxy
 from buddelkiste.dns_proxy import (
     DnsProxy,
+    HostDnsRelay,
     extract_answer_ips,
     extract_query,
     forward_query,
@@ -214,6 +217,85 @@ def test_forward_query_skips_nxdomain(monkeypatch: pytest.MonkeyPatch) -> None:
     assert reply is not None
     assert reply[3] & 0x0F == 0
     assert set(seen) == {"1.1.1.1", "172.16.0.1"}
+
+
+def test_forward_query_returns_before_dead_upstream_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blackholed earlier resolver must not hold a positive answer for ``timeout``."""
+
+    class FakeConn:
+        def __init__(self) -> None:
+            flags = 0x8000
+            body = struct.pack("!HHHHHH", 1, flags, 0, 0, 0, 0)
+            self._buf = struct.pack("!H", len(body)) + body
+
+        def settimeout(self, _t: float) -> None:
+            return None
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, n: int) -> bytes:
+            chunk = self._buf[:n]
+            self._buf = self._buf[n:]
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a: object) -> bool:
+            return False
+
+    def create_connection(address: tuple[str, int], timeout: float | None = None) -> FakeConn:
+        if address[0] == "192.0.2.1":
+            time.sleep(timeout or 1.5)
+            raise OSError("timed out")
+        return FakeConn()
+
+    monkeypatch.setattr(dns_proxy.socket, "create_connection", create_connection)
+    started = time.monotonic()
+    reply = forward_query(_query("heise.de"), ["192.0.2.1", "1.1.1.1"])
+    elapsed = time.monotonic() - started
+    assert reply is not None
+    assert reply[3] & 0x0F == 0
+    assert elapsed < 0.5
+
+
+def test_host_dns_relay_forwards_to_one_resolver(tmp_path) -> None:
+    query = _query("heise.de")
+    response = struct.pack("!HHHHHH", 1, 0x8000, 1, 0, 0, 0)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.listen(1)
+
+        def serve() -> None:
+            conn, _addr = srv.accept()
+            with conn:
+                header = conn.recv(2)
+                (length,) = struct.unpack("!H", header)
+                body = b""
+                while len(body) < length:
+                    chunk = conn.recv(length - len(body))
+                    if not chunk:
+                        break
+                    body += chunk
+                assert body == query
+                conn.sendall(struct.pack("!H", len(response)) + response)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        relay = HostDnsRelay(tmp_path / "dns.sock", "127.0.0.1", port)
+        relay.start()
+        try:
+            reply = forward_query(query, [str(tmp_path / "dns.sock")])
+        finally:
+            relay.stop()
+        thread.join(timeout=2)
+
+    assert reply == response
 
 
 def test_dns_proxy_handle_paths(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -27,6 +27,7 @@ from buddelkiste.network import (
     spawn_bwrap_dropped,
     split_families,
     start_slirp4netns,
+    stub_nameserver,
     with_share_net,
 )
 
@@ -92,6 +93,20 @@ def test_nameserver_ips_reads_systemd_uplink(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert nameserver_ips(sources=[stub, uplink]) == ["172.16.0.1", "1.1.1.1"]
+
+
+def test_stub_nameserver_only_when_resolv_is_loopback(tmp_path: Path) -> None:
+    stub = tmp_path / "stub.conf"
+    stub.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    assert stub_nameserver(stub) == "127.0.0.53"
+
+    mixed = tmp_path / "mixed.conf"
+    mixed.write_text("nameserver 127.0.0.53\nnameserver 1.1.1.1\n", encoding="utf-8")
+    assert stub_nameserver(mixed) is None
+
+    empty = tmp_path / "empty.conf"
+    empty.write_text("# none\n", encoding="utf-8")
+    assert stub_nameserver(empty) is None
 
 
 def test_nameserver_ips_skips_non_host_routes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,6 +314,7 @@ def test_run_network_inner_requires_tools(monkeypatch: pytest.MonkeyPatch) -> No
 def test_run_network_inner_without_proxy(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    monkeypatch.delenv("BUDDELKISTE_DNS_RELAY", raising=False)
     monkeypatch.setattr(
         "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
@@ -328,6 +344,7 @@ def test_run_network_inner_stub_resolver_starts_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Loopback-only resolv.conf must still install the DNS proxy."""
+    monkeypatch.setenv("BUDDELKISTE_DNS_RELAY", "/tmp/bk-dns.sock")
     monkeypatch.setattr(
         "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
@@ -367,19 +384,19 @@ def test_run_network_inner_stub_resolver_starts_proxy(
     assert code == 0
     proxy.start.assert_called_once()
     assert created["listen_port"] == 53
-    assert created["upstreams"][:2] == ["1.1.1.1", "8.8.8.8"]
+    assert created["upstreams"] == ["/tmp/bk-dns.sock"]
     assert "nameserver 127.0.0.1" in captured["resolv"]
 
 
-def test_run_network_inner_stub_resolver_uses_uplink_via_proxy(
+def test_run_network_inner_stub_forwards_only_to_host_relay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Uplink resolvers must not skip the proxy when the sandbox file is a stub.
+    """A stub resolv.conf is forwarded to the host relay, not each uplink.
 
-    ``nameserver_ips()`` includes systemd-resolved's uplink list, but glibc
-    inside the sandbox still reads ``/etc/resolv.conf``. If that file is only
-    ``127.0.0.53``, the proxy has to run and forward to the uplink first.
+    systemd-resolved already chooses upstreams and split-DNS. The sandbox proxy
+    must not dial that list itself.
     """
+    monkeypatch.setenv("BUDDELKISTE_DNS_RELAY", "/tmp/bk-dns.sock")
     monkeypatch.setattr(
         "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
@@ -414,12 +431,13 @@ def test_run_network_inner_stub_resolver_uses_uplink_via_proxy(
     )
     assert code == 0
     proxy.start.assert_called_once()
-    assert created["upstreams"][:3] == ["172.16.0.1", "1.1.1.1", "8.8.8.8"]
+    assert created["upstreams"] == ["/tmp/bk-dns.sock"]
 
 
 def test_run_network_inner_with_proxy_and_slirp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("BUDDELKISTE_DNS_RELAY", raising=False)
     which_map = {
         "nft": "/bin/nft",
         "setpriv": "/bin/setpriv",

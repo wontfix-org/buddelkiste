@@ -34,6 +34,7 @@ import click
 from buddelkiste.dns_proxy import (
     DNS_PROXY_PORT,
     DnsProxy,
+    HostDnsRelay,
     is_valid_hostname_pattern,
     nft_add_allow_ip,
 )
@@ -422,20 +423,15 @@ def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
     return result
 
 
-# systemd-resolved writes the uplink servers here. /etc/resolv.conf is often
-# only the loopback stub (127.0.0.53), which cannot answer split-DNS names.
-_SYSTEMD_RESOLV_CONF = Path("/run/systemd/resolve/resolv.conf")
-
-
+# Loopback stubs such as systemd-resolved's 127.0.0.53 are not dialed from
+# the sandbox. start_host_dns_relay forwards to the stub from the host netns.
 def _nameserver_ips_from(path: Path) -> list[str]:
     ips: list[str] = []
     for cidr in resolv_conf_nameservers(path):
         net = ipaddress.ip_network(cidr, strict=False)
         if net.version == 4 and net.prefixlen == 32 or net.version == 6 and net.prefixlen == 128:
             addr = net.network_address
-            # Stub resolvers on loopback (for example systemd-resolved 127.0.0.53)
-            # are usually unreachable from our isolated netns; skip them and let
-            # run_network_inner choose a reachable fallback.
+            # Loopback stubs are reached via the host-netns relay, not from here.
             if addr.is_loopback:
                 continue
             ips.append(str(addr))
@@ -445,9 +441,9 @@ def _nameserver_ips_from(path: Path) -> list[str]:
 def sandbox_nameservers(path: Path | None = None) -> list[str]:
     """Non-loopback nameservers in the resolv.conf the sandbox inherits.
 
-    glibc reads ``/etc/resolv.conf`` only. systemd-resolved's uplink list is
-    not part of that file, so a stub entry (``127.0.0.53``) means the sandbox
-    has no usable resolver until the DNS proxy replaces it.
+    glibc reads ``/etc/resolv.conf`` only. A stub entry (``127.0.0.53``) means
+    the sandbox has no usable resolver until queries are relayed to that stub
+    from the host netns.
     """
     return _nameserver_ips_from(path or Path("/etc/resolv.conf"))
 
@@ -459,18 +455,59 @@ def nameserver_ips(
 ) -> list[str]:
     """Bare nameserver addresses for DNS upstream forwarding.
 
-    With no path, read /etc/resolv.conf and, when present, systemd-resolved's
-    uplink list. Loopback stubs are omitted.
+    With no path, read /etc/resolv.conf only. Loopback stubs are omitted: those
+    are reached through :func:`start_host_dns_relay`, not by dialing every
+    uplink systemd-resolved would ask.
     """
     if path is not None:
         return _nameserver_ips_from(path)
-    paths = list(sources) if sources is not None else [Path("/etc/resolv.conf"), _SYSTEMD_RESOLV_CONF]
+    paths = list(sources) if sources is not None else [Path("/etc/resolv.conf")]
     ips: list[str] = []
     for source in paths:
         for ip in _nameserver_ips_from(source):
             if ip not in ips:
                 ips.append(ip)
     return ips
+
+
+def stub_nameserver(path: Path | None = None) -> str | None:
+    """Loopback stub in resolv.conf when that file lists no other nameserver.
+
+    ``None`` when a reachable nameserver is configured, or when the file has
+    no nameservers at all.
+    """
+    loopback: str | None = None
+    for cidr in resolv_conf_nameservers(path):
+        net = ipaddress.ip_network(cidr, strict=False)
+        host_route = (net.version == 4 and net.prefixlen == 32) or (
+            net.version == 6 and net.prefixlen == 128
+        )
+        if not host_route:
+            continue
+        if not net.network_address.is_loopback:
+            return None
+        if loopback is None:
+            loopback = str(net.network_address)
+    return loopback
+
+
+# Passed to the filter child: Unix socket of a relay running in the host netns.
+DNS_RELAY_ENV = "BUDDELKISTE_DNS_RELAY"
+
+
+def start_host_dns_relay(directory: Path) -> HostDnsRelay | None:
+    """Relay sandbox DNS to the host stub resolver, when resolv.conf is one.
+
+    The listener stays in this process, which is still in the host netns, so
+    it can dial ``127.0.0.53``. The guest only sees the socket path.
+    """
+    stub = stub_nameserver()
+    if stub is None:
+        return None
+    relay = HostDnsRelay(directory / "dns.sock", stub)
+    relay.start()
+    log.debug("DNS relay %s -> %s:53", relay.path, stub)
+    return relay
 
 
 def split_families(cidrs: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -827,36 +864,26 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
     try:
         extra_allow = resolv_conf_nameservers()
         upstreams = nameserver_ips()
-        if start_slirp:
-            # slirp4netns built-in DNS
+        relay = os.environ.get(DNS_RELAY_ENV)
+        if start_slirp and not relay:
+            # slirp4netns built-in DNS, used only when the host has no stub relay.
             extra_allow.append("10.0.2.3/32")
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
 
-        # Hostname rules need the proxy so answers can update nft. The sandbox
-        # inherits /etc/resolv.conf, which on systemd-resolved is only the
-        # loopback stub. That stub is unreachable with pasta's
-        # --map-host-loopback none. Uplink addresses from
-        # /run/systemd/resolve/resolv.conf still belong in ``upstreams`` (the
-        # proxy forwards to them) but they are not what glibc will query.
+        # Hostname rules need the proxy so answers can update nft. A resolv.conf
+        # that is only the systemd stub cannot be dialed from this netns; the
+        # parent relays that socket to 127.0.0.53 and systemd-resolved chooses
+        # the uplinks.
         use_proxy = net.needs_dns_proxy or not sandbox_nameservers()
         if use_proxy:
-            # Host resolvers first so split-DNS names (corporate zones the
-            # public resolvers answer NXDOMAIN for) still resolve. Public
-            # resolvers are the fallback when a host resolver does not answer.
-            fallback_upstreams = ("1.1.1.1", "8.8.8.8")
-            ordered_upstreams: list[str] = []
-            for ip in upstreams:
-                if ip not in ordered_upstreams:
-                    ordered_upstreams.append(ip)
-            for ip in fallback_upstreams:
-                if ip not in ordered_upstreams:
-                    ordered_upstreams.append(ip)
-            for ip in ordered_upstreams:
-                cidr = f"{ip}/{32 if ':' not in ip else 128}"
-                if cidr not in extra_allow:
-                    extra_allow.append(cidr)
-            upstreams = ordered_upstreams
+            if relay:
+                upstreams = [relay]
+            else:
+                for ip in upstreams:
+                    cidr = f"{ip}/{32 if ':' not in ip else 128}"
+                    if cidr not in extra_allow:
+                        extra_allow.append(cidr)
 
             # Route sandbox hostname resolution into the DNS proxy reliably.
             nss_lines: list[str]
@@ -926,7 +953,14 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
                 proxy.start()
                 listen_port = DNS_PROXY_PORT
 
-        dns_allow = [f"{ip}/{32 if ':' not in ip else 128}" for ip in upstreams]
+        dns_ips = []
+        for ip in upstreams:
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            dns_ips.append(ip)
+        dns_allow = [f"{ip}/{32 if ':' not in ip else 128}" for ip in dns_ips]
         ruleset = build_nft_ruleset(
             net,
             extra_allow=extra_allow,
@@ -1006,71 +1040,80 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
         child_env["PATH"] = path_with_tools(
             ("nft", "setpriv", "ip"), child_env.get("PATH")
         )
+        relay = start_host_dns_relay(tmp_path)
+        if relay is not None:
+            child_env[DNS_RELAY_ENV] = str(relay.path)
 
-        if kind == "pasta":
-            # pasta's spawn execs the command from the new namespaces. Debian
-            # pasta 20250503 returns EACCES for a binary under a 0700 home
-            # (the venv interpreter). /bin/sh is executable by everyone and
-            # then execs the real argv, which newer pasta can do directly too.
-            cmd = [
-                helper,
-                "--config-net",
-                # Newer pasta replaced --disable-host-loopback with this.
-                "--map-host-loopback",
-                "none",
-                "--",
-                "/bin/sh",
-                "-c",
-                'exec "$@"',
-                "buddelkiste-pasta",
-                *inner,
-            ]
-            log.debug("launch pasta filter: %s", " ".join(cmd))
-            return subprocess.run(cmd, check=False, env=child_env).returncode
-
-        # slirp4netns must run in the host netns. Its NAT sockets are the
-        # guest's path out; starting it inside the new netns blackholes them.
-        # The child only waits for tap0, then installs nftables.
-        if not which("unshare"):
-            raise click.ClickException("network.mode=filter with slirp4netns requires unshare")
-        cmd = [
-            "unshare",
-            "--user",
-            "--map-root-user",
-            "--net",
-            "--",
-            *inner,
-            "--start-slirp",
-        ]
-        log.debug("launch slirp filter: %s", " ".join(cmd))
-        child = subprocess.Popen(cmd, env=child_env)
-        slirp_proc = None
         try:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                if child.poll() is not None:
-                    return child.returncode
-                if _child_namespaces_ready(child.pid):
-                    slirp_proc = start_slirp4netns(
-                        helper,
-                        target_pid=child.pid,
-                        userns_path=f"/proc/{child.pid}/ns/user",
+            if kind == "pasta":
+                # pasta's spawn execs the command from the new namespaces. Debian
+                # pasta 20250503 returns EACCES for a binary under a 0700 home
+                # (the venv interpreter). /bin/sh is executable by everyone and
+                # then execs the real argv, which newer pasta can do directly too.
+                cmd = [
+                    helper,
+                    "--config-net",
+                    # Newer pasta replaced --disable-host-loopback with this.
+                    "--map-host-loopback",
+                    "none",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                    'exec "$@"',
+                    "buddelkiste-pasta",
+                    *inner,
+                ]
+                log.debug("launch pasta filter: %s", " ".join(cmd))
+                return subprocess.run(cmd, check=False, env=child_env).returncode
+
+            # slirp4netns must run in the host netns. Its NAT sockets are the
+            # guest's path out; starting it inside the new netns blackholes them.
+            # The child only waits for tap0, then installs nftables.
+            if not which("unshare"):
+                raise click.ClickException("network.mode=filter with slirp4netns requires unshare")
+            cmd = [
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--net",
+                "--",
+                *inner,
+                "--start-slirp",
+            ]
+            log.debug("launch slirp filter: %s", " ".join(cmd))
+            child = subprocess.Popen(cmd, env=child_env)
+            slirp_proc = None
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if child.poll() is not None:
+                        return child.returncode
+                    if _child_namespaces_ready(child.pid):
+                        slirp_proc = start_slirp4netns(
+                            helper,
+                            target_pid=child.pid,
+                            userns_path=f"/proc/{child.pid}/ns/user",
+                        )
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise click.ClickException(
+                        "timed out waiting for the filter network namespace"
                     )
-                    break
-                time.sleep(0.02)
-            else:
-                raise click.ClickException("timed out waiting for the filter network namespace")
-            return child.wait()
+                return child.wait()
+            finally:
+                if slirp_proc is not None and slirp_proc.poll() is None:
+                    slirp_proc.terminate()
+                    try:
+                        slirp_proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        slirp_proc.kill()
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
         finally:
-            if slirp_proc is not None and slirp_proc.poll() is None:
-                slirp_proc.terminate()
-                try:
-                    slirp_proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    slirp_proc.kill()
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    child.kill()
+            if relay is not None:
+                relay.stop()

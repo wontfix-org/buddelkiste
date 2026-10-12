@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -166,10 +167,34 @@ def _rcode(message: bytes) -> int | None:
     return struct.unpack("!H", message[2:4])[0] & 0x000F
 
 
+# Unreachable resolvers often blackhole until the TCP timeout. A short connect
+# budget lets a later upstream's answer through. ``_PREFER_EARLIER_UPSTREAM`` is
+# how long a higher-priority resolver may still override that answer for split-DNS.
+_UPSTREAM_CONNECT_TIMEOUT = 0.2
+_PREFER_EARLIER_UPSTREAM = 0.1
+
+
+def _open_upstream(upstream: str, timeout: float) -> socket.socket:
+    """Connect to an IP:53 resolver or an absolute Unix socket path."""
+    if upstream.startswith("/"):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(upstream)
+        except OSError:
+            sock.close()
+            raise
+        return sock
+    return socket.create_connection(
+        (upstream, 53),
+        timeout=min(_UPSTREAM_CONNECT_TIMEOUT, timeout),
+    )
+
+
 def _forward_one(payload: bytes, upstream: str, timeout: float) -> tuple[bytes | None, str]:
     """Query one upstream. Return ``(response, "")`` or ``(None, error)``."""
     try:
-        with socket.create_connection((upstream, 53), timeout=timeout) as sock:
+        with _open_upstream(upstream, timeout) as sock:
             sock.settimeout(timeout)
             sock.sendall(payload)
             header = _recvexact(sock, 2)
@@ -197,13 +222,16 @@ def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 1.5) 
     """Forward a DNS query to an upstream resolver.
 
     Uses DNS-over-TCP so upstream queries are not caught by the in-namespace
-    nftables UDP/53 redirect that steers guest traffic to this proxy.
+    nftables UDP/53 redirect that steers guest traffic to this proxy. An
+    upstream that is an absolute path is a Unix socket, used to reach the host
+    resolver from inside the sandbox netns.
 
     Upstreams are queried together. An earlier address wins when it returns a
     usable answer, so split-DNS host resolvers stay ahead of the public
-    fallbacks. Unreachable host resolvers do not block those fallbacks past
-    ``timeout``. NXDOMAIN and SERVFAIL are not final while another upstream
-    can still answer.
+    fallbacks. A positive answer is returned once higher-priority upstreams have
+    finished or ``_PREFER_EARLIER_UPSTREAM`` has passed, so a blackholed resolver
+    does not hold the query for the full ``timeout``. NXDOMAIN and SERVFAIL are
+    not final while another upstream can still answer.
     """
     payload = struct.pack("!H", len(query)) + query
     if not upstreams:
@@ -246,12 +274,23 @@ def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 1.5) 
         return negative
 
     deadline = time.monotonic() + timeout
+    positive_since: float | None = None
     chosen: bytes | None | object = _PENDING
     while time.monotonic() < deadline:
         with lock:
             chosen = choose(allow_pending=True)
             if chosen is not _PENDING or all(done):
                 break
+            ready = choose(allow_pending=False)
+            if isinstance(ready, bytes) and _positive_dns(ready):
+                now = time.monotonic()
+                if positive_since is None:
+                    positive_since = now
+                elif now - positive_since >= _PREFER_EARLIER_UPSTREAM:
+                    chosen = ready
+                    break
+            else:
+                positive_since = None
         time.sleep(0.02)
     if chosen is _PENDING:
         with lock:
@@ -268,6 +307,98 @@ def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 1.5) 
 
 
 _PENDING = object()
+
+
+class HostDnsRelay:
+    """Forward DNS-over-TCP from a Unix socket to the host stub resolver.
+
+    The sandbox netns cannot reach ``127.0.0.53``. This relay runs in the host
+    netns, where that stub is the local systemd-resolved, and the guest proxy
+    speaks to the socket instead of dialing every uplink itself.
+    """
+
+    def __init__(self, path: Path, upstream: str, port: int = 53) -> None:
+        self.path = path
+        self.upstream = upstream
+        self.port = port
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if path.exists():
+            path.unlink()
+        self._sock.bind(str(path))
+        path.chmod(0o600)
+        self._sock.listen(32)
+        self._sock.settimeout(0.5)
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="buddelkiste-dns-relay",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2)
+        self.path.unlink(missing_ok=True)
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            with conn:
+                header = _recvexact(conn, 2)
+                if header is None:
+                    return
+                (length,) = struct.unpack("!H", header)
+                if length == 0 or length > 65535:
+                    return
+                body = _recvexact(conn, length)
+                if body is None:
+                    return
+                data, _err = _forward_tcp(self.upstream, self.port, header + body, 2.0)
+                if data is not None:
+                    conn.sendall(struct.pack("!H", len(data)) + data)
+        except OSError as exc:
+            log.debug("DNS relay failed: %s", exc)
+
+
+def _forward_tcp(
+    host: str,
+    port: int,
+    payload: bytes,
+    timeout: float,
+) -> tuple[bytes | None, str]:
+    """Send one length-prefixed DNS query over TCP and return the body."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(payload)
+            header = _recvexact(sock, 2)
+            if header is None:
+                return None, f"{host}: closed before response header"
+            (length,) = struct.unpack("!H", header)
+            if length == 0 or length > 65535:
+                return None, f"{host}: invalid length {length}"
+            data = _recvexact(sock, length)
+            if data is None:
+                return None, f"{host}: closed before full response body"
+            return data, ""
+    except OSError as exc:
+        return None, f"{host}: {type(exc).__name__}: {exc}"
 
 
 class DnsProxy:

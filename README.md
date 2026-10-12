@@ -544,7 +544,9 @@ nftables allow sets from resolved A/AAAA records. Default policy is `allow`:
 public egress is accepted, and the `internal` and `localhost` deny presets
 reject private ranges (RFC1918/ULA) and loopback. `policy = "deny"` rejects
 every destination that is not listed in allow. The chain policy stays `drop`
-because a base chain cannot use `reject` as its policy. Nameserver IPs from
+because a base chain cannot use `reject` as its policy. When resolv.conf is
+only a loopback stub, sandbox DNS is relayed to that stub from the host netns
+and systemd-resolved chooses the uplinks. Other nameserver IPs from
 `/etc/resolv.conf` are auto-allowed so DNS still works under that deny policy.
 
 ## Development
