@@ -19,6 +19,7 @@ import ipaddress
 import json
 import logging
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -597,8 +598,29 @@ def build_nft_ruleset(
     return "\n".join(lines) + "\n"
 
 
+# When set to pasta or slirp4netns, filter mode uses that backend.
+NET_HELPER_ENV = "BUDDELKISTE_NET_HELPER"
+_NET_HELPERS = ("pasta", "slirp4netns")
+
+
 def find_net_helper() -> tuple[str, str]:
-    """Return (kind, path) for pasta or slirp4netns."""
+    """Return (kind, path) for pasta or slirp4netns.
+
+    ``BUDDELKISTE_NET_HELPER`` picks one when both are installed. Unset, pasta
+    wins and slirp4netns is the fallback.
+    """
+    forced = os.environ.get(NET_HELPER_ENV)
+    if forced:
+        if forced not in _NET_HELPERS:
+            raise click.ClickException(
+                f"{NET_HELPER_ENV} must be pasta or slirp4netns (got {forced!r})"
+            )
+        path = which(forced)
+        if not path:
+            raise click.ClickException(
+                f"{NET_HELPER_ENV}={forced} but {forced} is not on PATH"
+            )
+        return forced, path
     pasta = which("pasta")
     if pasta:
         return "pasta", pasta
@@ -659,31 +681,94 @@ def apply_nft_ruleset(ruleset: str) -> None:
         raise click.ClickException(f"failed to install nftables rules: {detail}")
 
 
-def start_slirp4netns(slirp_bin: str) -> subprocess.Popen:
-    pid = os.getpid()
-    proc = subprocess.Popen(
-        [
-            slirp_bin,
-            "--configure",
-            "--mtu=65520",
-            "--disable-host-loopback",
-            str(pid),
-            "tap0",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    tap = Path("/sys/class/net/tap0")
-    for _ in range(100):
-        if tap.exists():
-            return proc
-        if proc.poll() is not None:
-            err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")
-            raise click.ClickException(f"slirp4netns exited during startup: {err.strip()}")
+def _child_namespaces_ready(pid: int) -> bool:
+    """True once ``pid`` is in a user and network namespace other than ours."""
+    try:
+        own_user = os.readlink("/proc/self/ns/user")
+        own_net = os.readlink("/proc/self/ns/net")
+        return (
+            os.readlink(f"/proc/{pid}/ns/user") != own_user
+            and os.readlink(f"/proc/{pid}/ns/net") != own_net
+        )
+    except OSError:
+        return False
+
+
+def _wait_for_tap(name: str = "tap0", timeout: float = 5) -> None:
+    """Wait until slirp, running in the parent, has created ``name`` here."""
+    deadline = time.monotonic() + timeout
+    devs: list[str] = []
+    while time.monotonic() < deadline:
+        try:
+            lines = Path("/proc/net/dev").read_text(encoding="utf-8").splitlines()
+            devs = [line.split(":", 1)[0].strip() for line in lines[2:]]
+        except OSError:
+            devs = []
+        if name in devs:
+            return
         time.sleep(0.05)
-    proc.terminate()
-    raise click.ClickException("timed out waiting for slirp4netns tap0")
+    raise click.ClickException(f"timed out waiting for slirp4netns {name}")
+
+
+def start_slirp4netns(
+    slirp_bin: str,
+    *,
+    target_pid: int | None = None,
+    userns_path: str | None = None,
+) -> subprocess.Popen:
+    """Start slirp4netns and wait until it reports the tap is configured.
+
+    ``/sys/class/net`` is the host sysfs mount, so ``tap0`` inside the new
+    netns never shows up there. ``--ready-fd`` is slirp's own ready signal.
+    The process must run in the host netns: its NAT sockets are how guest
+    traffic leaves the machine. ``userns_path`` is required when the target
+    pid is in a user namespace this process is not part of.
+    """
+    pid = os.getpid() if target_pid is None else target_pid
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(write_fd, True)
+    argv = [
+        slirp_bin,
+        "--configure",
+        "--mtu=65520",
+        "--disable-host-loopback",
+    ]
+    if userns_path:
+        argv.extend(["--userns-path", userns_path])
+    argv.extend(["--ready-fd", str(write_fd), str(pid), "tap0"])
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            pass_fds=(write_fd,),
+        )
+    except Exception:
+        os.close(write_fd)
+        os.close(read_fd)
+        raise
+    os.close(write_fd)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")
+                raise click.ClickException(f"slirp4netns exited during startup: {err.strip()}")
+            remaining = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([read_fd], [], [], min(0.05, remaining))
+            if readable:
+                os.read(read_fd, 16)
+                return proc
+        proc.terminate()
+        try:
+            proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=1)
+        raise click.ClickException("timed out waiting for slirp4netns tap0")
+    finally:
+        os.close(read_fd)
 
 
 def spawn_bwrap_dropped(bwrap_args: list[str]) -> subprocess.Popen:
@@ -731,10 +816,10 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
     nsswitch_override: Path | None = None
     resolv_override: Path | None = None
     if start_slirp:
-        slirp_bin = which("slirp4netns")
-        if not slirp_bin:
-            raise click.ClickException("slirp4netns is required for this network backend")
-        slirp_proc = start_slirp4netns(slirp_bin)
+        # The parent starts slirp4netns in the host netns and points it at
+        # this process. Waiting here keeps nftables off the interface until
+        # the tap exists.
+        _wait_for_tap()
 
     try:
         extra_allow = resolv_conf_nameservers()
@@ -802,7 +887,7 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
                 prefix="bk-resolv-",
                 delete=False,
             ) as fh:
-                fh.write("nameserver 127.0.0.1\noptions attempts:1 timeout:2\n")
+                fh.write("nameserver 127.0.0.1\noptions attempts:1 timeout:4\n")
                 resolv_override = Path(fh.name)
             bwrap_args = _replace_ro_bind_target(
                 bwrap_args, "/etc/nsswitch.conf", str(nsswitch_override)
@@ -940,7 +1025,9 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             log.debug("launch pasta filter: %s", " ".join(cmd))
             return subprocess.run(cmd, check=False, env=child_env).returncode
 
-        # slirp4netns: create userns+netns, then inner starts slirp
+        # slirp4netns must run in the host netns. Its NAT sockets are the
+        # guest's path out; starting it inside the new netns blackholes them.
+        # The child only waits for tap0, then installs nftables.
         if not which("unshare"):
             raise click.ClickException("network.mode=filter with slirp4netns requires unshare")
         cmd = [
@@ -953,4 +1040,34 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             "--start-slirp",
         ]
         log.debug("launch slirp filter: %s", " ".join(cmd))
-        return subprocess.run(cmd, check=False, env=child_env).returncode
+        child = subprocess.Popen(cmd, env=child_env)
+        slirp_proc = None
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if child.poll() is not None:
+                    return child.returncode
+                if _child_namespaces_ready(child.pid):
+                    slirp_proc = start_slirp4netns(
+                        helper,
+                        target_pid=child.pid,
+                        userns_path=f"/proc/{child.pid}/ns/user",
+                    )
+                    break
+                time.sleep(0.02)
+            else:
+                raise click.ClickException("timed out waiting for the filter network namespace")
+            return child.wait()
+        finally:
+            if slirp_proc is not None and slirp_proc.poll() is None:
+                slirp_proc.terminate()
+                try:
+                    slirp_proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    slirp_proc.kill()
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    child.kill()

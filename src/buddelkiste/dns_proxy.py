@@ -8,6 +8,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Sequence
 
 log = logging.getLogger(__name__)
@@ -165,52 +166,108 @@ def _rcode(message: bytes) -> int | None:
     return struct.unpack("!H", message[2:4])[0] & 0x000F
 
 
-def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 2.0) -> bytes | None:
+def _forward_one(payload: bytes, upstream: str, timeout: float) -> tuple[bytes | None, str]:
+    """Query one upstream. Return ``(response, "")`` or ``(None, error)``."""
+    try:
+        with socket.create_connection((upstream, 53), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(payload)
+            header = _recvexact(sock, 2)
+            if header is None:
+                return None, f"{upstream}: closed before response header"
+            (length,) = struct.unpack("!H", header)
+            if length == 0 or length > 65535:
+                return None, f"{upstream}: invalid length {length}"
+            data = _recvexact(sock, length)
+            if data is None:
+                return None, f"{upstream}: closed before full response body"
+            return data, ""
+    except OSError as exc:
+        return None, f"{upstream}: {type(exc).__name__}: {exc}"
+
+
+def _positive_dns(data: bytes | None) -> bool:
+    if data is None:
+        return False
+    rcode = _rcode(data)
+    return rcode not in (2, 3)
+
+
+def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 1.5) -> bytes | None:
     """Forward a DNS query to an upstream resolver.
 
     Uses DNS-over-TCP so upstream queries are not caught by the in-namespace
     nftables UDP/53 redirect that steers guest traffic to this proxy.
 
-    NXDOMAIN and SERVFAIL are not final: the next upstream is tried. A public
-    resolver often NXDOMAINs a split-DNS name that the host's resolver knows.
+    Upstreams are queried together. An earlier address wins when it returns a
+    usable answer, so split-DNS host resolvers stay ahead of the public
+    fallbacks. Unreachable host resolvers do not block those fallbacks past
+    ``timeout``. NXDOMAIN and SERVFAIL are not final while another upstream
+    can still answer.
     """
     payload = struct.pack("!H", len(query)) + query
-    negative: bytes | None = None
-    for upstream in upstreams:
-        try:
-            with socket.create_connection((upstream, 53), timeout=timeout) as sock:
-                sock.settimeout(timeout)
-                sock.sendall(payload)
-                header = _recvexact(sock, 2)
-                if header is None:
-                    log.debug("DNS upstream %s closed before response header", upstream)
-                    continue
-                (length,) = struct.unpack("!H", header)
-                if length == 0 or length > 65535:
-                    log.debug("DNS upstream %s returned invalid length %s", upstream, length)
-                    continue
-                data = _recvexact(sock, length)
-                if data is None:
-                    log.debug("DNS upstream %s closed before full response body", upstream)
-                    continue
-                rcode = _rcode(data)
-                if rcode in (2, 3):
-                    log.debug("DNS upstream %s rcode %s; trying next", upstream, rcode)
+    if not upstreams:
+        log.warning("no DNS upstreams configured; answering NXDOMAIN")
+        return None
+
+    results: list[bytes | None] = [None] * len(upstreams)
+    done = [False] * len(upstreams)
+    lock = threading.Lock()
+
+    def attempt(index: int, upstream: str) -> None:
+        data, err = _forward_one(payload, upstream, timeout)
+        if err:
+            log.debug("DNS upstream %s failed: %s", upstream, err)
+        with lock:
+            results[index] = data
+            done[index] = True
+
+    threads = [
+        threading.Thread(target=attempt, args=(index, upstream), daemon=True)
+        for index, upstream in enumerate(upstreams)
+    ]
+    for thread in threads:
+        thread.start()
+
+    def choose(*, allow_pending: bool) -> bytes | None | object:
+        negative: bytes | None = None
+        for finished, data in zip(done, results, strict=True):
+            if not finished:
+                if allow_pending:
+                    return _PENDING
+                continue
+            if data is None:
+                continue
+            if not _positive_dns(data):
+                if negative is None:
                     negative = data
-                    continue
-                return data
-        except OSError as exc:
-            log.debug("DNS upstream %s failed: %s", upstream, exc)
-    if negative is not None:
+                continue
+            return data
         return negative
+
+    deadline = time.monotonic() + timeout
+    chosen: bytes | None | object = _PENDING
+    while time.monotonic() < deadline:
+        with lock:
+            chosen = choose(allow_pending=True)
+            if chosen is not _PENDING or all(done):
+                break
+        time.sleep(0.02)
+    if chosen is _PENDING:
+        with lock:
+            chosen = choose(allow_pending=False)
+
+    if isinstance(chosen, bytes):
+        return chosen
     if upstreams:
         log.warning(
             "all DNS upstreams failed (%s); answering NXDOMAIN",
             ", ".join(upstreams),
         )
-    else:
-        log.warning("no DNS upstreams configured; answering NXDOMAIN")
     return None
+
+
+_PENDING = object()
 
 
 class DnsProxy:
