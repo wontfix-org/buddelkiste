@@ -518,6 +518,8 @@ def build_nft_ruleset(
     deny4, deny6 = split_families(deny)
     dns4, dns6 = split_families(dns_allow)
 
+    # A base chain policy can only be accept or drop. Deny mode still rejects
+    # with an explicit rule so guests fail fast; policy drop is the backstop.
     default_policy = "accept" if net.policy == "allow" else "drop"
 
     def set_elements(items: list[str]) -> str:
@@ -570,17 +572,18 @@ def build_nft_ruleset(
         "    ct state established,related accept",
         # Nameserver and allow-host addresses are accepted before the private
         # deny presets. Otherwise split-DNS resolvers and allowed names that
-        # live in RFC1918 are dropped even though policy allow would pass them.
+        # live in RFC1918 are rejected even though policy allow would pass them.
         "    ip daddr @dns4 tcp dport 53 accept",
         "    ip daddr @dns4 udp dport 53 accept",
         "    ip6 daddr @dns6 tcp dport 53 accept",
         "    ip6 daddr @dns6 udp dport 53 accept",
         "    ip daddr @dyn_allow4 accept",
         "    ip6 daddr @dyn_allow6 accept",
-        "    ip daddr @deny4 drop",
-        "    ip6 daddr @deny6 drop",
+        "    ip daddr @deny4 reject",
+        "    ip6 daddr @deny6 reject",
         "    ip daddr @allow4 accept",
         "    ip6 daddr @allow6 accept",
+        *(["    reject"] if net.policy == "deny" else []),
         "  }",
     ]
     if dns_proxy:

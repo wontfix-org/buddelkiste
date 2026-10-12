@@ -34,7 +34,7 @@ def test_filter_allows_listed_ip(run_bk) -> None:
 
 @pytest.mark.requires_outbound
 def test_filter_denies_unlisted_ip(run_bk) -> None:
-    """Deny policy drops a public address that is not on the allow list.
+    """Deny policy rejects a public address that is not on the allow list.
 
     Default policy is allow, so this case has to opt into deny. 8.8.8.8 is
     not a usable target: with a stub resolv.conf the DNS proxy treats it as
@@ -84,7 +84,7 @@ def test_filter_default_policy_connects_public_https(run_bk) -> None:
     Same path as ``curl --connect-timeout=3 https://www.heise.de`` inside
     ``bk run`` with no extra allow rules: resolve IPv4, then connect.
     Default policy is allow, so the public address is reachable. The internal
-    and localhost deny presets still drop private and loopback ranges.
+    and localhost deny presets still reject private and loopback ranges.
     """
     proc = run_bk(
         "--",

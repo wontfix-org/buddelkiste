@@ -54,9 +54,10 @@ Modes: filter (default; private netns via pasta or slirp4netns with
 in-namespace nftables IP/CIDR allow/deny), host (share host network), none
 (no connectivity). Filter mode needs no root and no reserved host subnets.
 Default policy is allow: public egress is accepted. The ``internal`` and
-``localhost`` deny presets drop private ranges (RFC1918/ULA) and loopback.
-Host loopback is additionally blocked by pasta/slirp. policy deny drops every
-destination that is not listed in allow.
+``localhost`` deny presets reject private ranges (RFC1918/ULA) and loopback.
+Host loopback is additionally blocked by pasta/slirp. policy deny rejects every
+destination that is not listed in allow. The chain policy stays drop because a
+base chain cannot use reject as its policy.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under policy deny. Rules may be IP/CIDR literals or hostnames

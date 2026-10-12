@@ -254,8 +254,8 @@ def test_build_nft_ruleset_allowlist() -> None:
         dns_allow=["172.16.0.1/32"],
     )
     chain = punched.split("chain output", 1)[1]
-    assert chain.index("@dyn_allow4 accept") < chain.index("@deny4 drop")
-    assert chain.index("dport 53 accept") < chain.index("@deny4 drop")
+    assert chain.index("@dyn_allow4 accept") < chain.index("@deny4 reject")
+    assert chain.index("dport 53 accept") < chain.index("@deny4 reject")
     assert "172.16.0.1/32" in punched
 
 
@@ -264,6 +264,8 @@ def test_build_nft_ruleset_denylist_policy_allow() -> None:
     rules = build_nft_ruleset(net)
     assert "policy accept" in rules
     assert "10.0.0.0/8" in rules
+    assert "@deny4 reject" in rules
+    assert "\n    reject\n" not in rules
 
 
 def test_build_nft_ruleset_collapses_overlapping_intervals() -> None:

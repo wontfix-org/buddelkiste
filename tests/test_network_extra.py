@@ -124,6 +124,7 @@ def test_split_families_and_empty_nft_sets() -> None:
     rules = build_nft_ruleset(NetworkConfig(mode="filter", policy="deny"))
     assert "elements =" not in rules
     assert "policy drop" in rules
+    assert "\n    reject\n" in rules
     default_rules = build_nft_ruleset(resolve_network({}))
     assert "policy accept" in default_rules
     assert "10.0.0.0/8" in default_rules

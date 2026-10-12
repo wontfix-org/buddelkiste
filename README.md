@@ -542,8 +542,9 @@ this private store. BuildKit via the Docker CLI also needs a working
 Hostname rules start a DNS proxy that redirects UDP/53 and updates dynamic
 nftables allow sets from resolved A/AAAA records. Default policy is `allow`:
 public egress is accepted, and the `internal` and `localhost` deny presets
-drop private ranges (RFC1918/ULA) and loopback. `policy = "deny"` drops every
-destination that is not listed in allow. Nameserver IPs from
+reject private ranges (RFC1918/ULA) and loopback. `policy = "deny"` rejects
+every destination that is not listed in allow. The chain policy stays `drop`
+because a base chain cannot use `reject` as its policy. Nameserver IPs from
 `/etc/resolv.conf` are auto-allowed so DNS still works under that deny policy.
 
 ## Development
