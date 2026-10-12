@@ -325,6 +325,7 @@ def test_run_bwrap_none_no_share_net(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     def which(name: str):
         return {
             "nft": "/usr/bin/nft",
@@ -337,6 +338,7 @@ def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     def which(name: str):
         return {
             "nft": "/usr/bin/nft",

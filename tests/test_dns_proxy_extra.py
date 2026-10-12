@@ -213,7 +213,7 @@ def test_forward_query_skips_nxdomain(monkeypatch: pytest.MonkeyPatch) -> None:
     reply = forward_query(_query("gitlab.example"), ["1.1.1.1", "172.16.0.1"])
     assert reply is not None
     assert reply[3] & 0x0F == 0
-    assert seen == ["1.1.1.1", "172.16.0.1"]
+    assert set(seen) == {"1.1.1.1", "172.16.0.1"}
 
 
 def test_dns_proxy_handle_paths(monkeypatch: pytest.MonkeyPatch) -> None:

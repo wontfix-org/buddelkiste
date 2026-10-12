@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,6 +10,7 @@ import pytest
 from buddelkiste.dns_proxy import DnsProxy
 from buddelkiste.network import (
     NetworkConfig,
+    _wait_for_tap,
     apply_nft_ruleset,
     build_nft_ruleset,
     ensure_filter_tools,
@@ -142,6 +144,7 @@ def test_with_share_net_idempotent_and_without_unshare() -> None:
 
 
 def test_find_net_helper_and_ensure_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     monkeypatch.setattr(
         "buddelkiste.network.which",
         lambda name: {"slirp4netns": "/bin/slirp"}.get(name),
@@ -165,6 +168,27 @@ def test_find_net_helper_and_ensure_tools(monkeypatch: pytest.MonkeyPatch) -> No
     )
     with pytest.raises(click.ClickException, match="setpriv"):
         ensure_filter_tools()
+
+
+def test_find_net_helper_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "buddelkiste.network.which",
+        lambda name: {"pasta": "/bin/pasta", "slirp4netns": "/bin/slirp"}.get(name),
+    )
+    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "slirp4netns")
+    assert find_net_helper() == ("slirp4netns", "/bin/slirp")
+
+    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "pasta")
+    assert find_net_helper() == ("pasta", "/bin/pasta")
+
+    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "nope")
+    with pytest.raises(click.ClickException, match="BUDDELKISTE_NET_HELPER"):
+        find_net_helper()
+
+    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "slirp4netns")
+    monkeypatch.setattr("buddelkiste.network.which", lambda name: None)
+    with pytest.raises(click.ClickException, match="not on PATH"):
+        find_net_helper()
 
 
 def test_apply_nft_ruleset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,28 +242,41 @@ def test_preseed_host_allows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_start_slirp4netns_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    ready = MagicMock()
-    ready.poll.return_value = None
-    ready.stderr = MagicMock(read=lambda: b"")
-    monkeypatch.setattr(
-        "buddelkiste.network.subprocess.Popen", lambda *a, **k: ready
-    )
-    monkeypatch.setattr("buddelkiste.network.Path.exists", lambda self: True)
-    assert start_slirp4netns("/bin/slirp") is ready
+    seen: dict = {}
+
+    def popen_ready(args, **_kwargs):
+        fd = int(args[args.index("--ready-fd") + 1])
+        os.write(fd, b"1")
+        proc = MagicMock()
+        proc.poll.return_value = None
+        seen["proc"] = proc
+        seen["args"] = list(args)
+        return proc
+
+    monkeypatch.setattr("buddelkiste.network.subprocess.Popen", popen_ready)
+    assert start_slirp4netns("/bin/slirp") is seen["proc"]
+    assert "--ready-fd" in seen["args"]
 
     dead = MagicMock()
     dead.poll.return_value = 1
     dead.stderr = MagicMock(read=lambda: b"no tap")
     monkeypatch.setattr("buddelkiste.network.subprocess.Popen", lambda *a, **k: dead)
-    monkeypatch.setattr("buddelkiste.network.Path.exists", lambda self: False)
     with pytest.raises(click.ClickException, match="exited during startup"):
         start_slirp4netns("/bin/slirp")
 
     hung = MagicMock()
     hung.poll.return_value = None
     hung.terminate = MagicMock()
+    hung.communicate.return_value = (None, b"")
     monkeypatch.setattr("buddelkiste.network.subprocess.Popen", lambda *a, **k: hung)
-    monkeypatch.setattr("buddelkiste.network.time.sleep", lambda _t: None)
+    monkeypatch.setattr("buddelkiste.network.select.select", lambda *a, **k: ([], [], []))
+    clock = {"t": 0.0}
+
+    def monotonic() -> float:
+        clock["t"] += 3
+        return clock["t"]
+
+    monkeypatch.setattr("buddelkiste.network.time.monotonic", monotonic)
     with pytest.raises(click.ClickException, match="timed out"):
         start_slirp4netns("/bin/slirp")
     hung.terminate.assert_called()
@@ -266,7 +303,7 @@ def test_run_network_inner_without_proxy(
         lambda name: f"/bin/{name}",
     )
     monkeypatch.setattr(
-        "buddelkiste.network.resolv_conf_nameservers", lambda: ["9.9.9.9/32"]
+        "buddelkiste.network.resolv_conf_nameservers", lambda path=None: ["9.9.9.9/32"]
     )
     monkeypatch.setattr("buddelkiste.network.nameserver_ips", lambda: ["9.9.9.9"])
     monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
@@ -295,7 +332,7 @@ def test_run_network_inner_stub_resolver_starts_proxy(
         lambda name: f"/bin/{name}",
     )
     monkeypatch.setattr(
-        "buddelkiste.network.resolv_conf_nameservers", lambda: ["127.0.0.53/32"]
+        "buddelkiste.network.resolv_conf_nameservers", lambda path=None: ["127.0.0.53/32"]
     )
     monkeypatch.setattr("buddelkiste.network.nameserver_ips", list)
     monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
@@ -388,12 +425,9 @@ def test_run_network_inner_with_proxy_and_slirp(
         "slirp4netns": "/bin/slirp",
     }
     monkeypatch.setattr("buddelkiste.network.which", lambda name: which_map.get(name))
-
-    slirp = MagicMock()
-    slirp.poll.return_value = None
-    monkeypatch.setattr("buddelkiste.network.start_slirp4netns", lambda bin: slirp)
+    monkeypatch.setattr("buddelkiste.network._wait_for_tap", lambda: None)
     monkeypatch.setattr(
-        "buddelkiste.network.resolv_conf_nameservers", lambda: ["1.1.1.1/32"]
+        "buddelkiste.network.resolv_conf_nameservers", lambda path=None: ["1.1.1.1/32"]
     )
     monkeypatch.setattr("buddelkiste.network.nameserver_ips", lambda: ["1.1.1.1"])
     monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
@@ -419,7 +453,6 @@ def test_run_network_inner_with_proxy_and_slirp(
     assert code == 0
     proxy.start.assert_called_once()
     proxy.stop.assert_called_once()
-    slirp.terminate.assert_called_once()
 
     # Slirp DNS already present as upstream — skip the duplicate append.
     monkeypatch.setattr(
@@ -433,16 +466,29 @@ def test_run_network_inner_with_proxy_and_slirp(
     assert code == 0
 
 
-def test_run_network_inner_missing_slirp(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "buddelkiste.network.which",
-        lambda name: {"nft": "/bin/nft", "setpriv": "/bin/setpriv"}.get(name),
-    )
-    with pytest.raises(click.ClickException, match="slirp4netns is required"):
-        run_network_inner(NetworkConfig(mode="filter"), ["bwrap"], start_slirp=True)
+def test_wait_for_tap_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("buddelkiste.network.time.sleep", lambda _seconds: None)
+    clock = {"t": 0.0}
+
+    def monotonic() -> float:
+        clock["t"] += 3
+        return clock["t"]
+
+    monkeypatch.setattr("buddelkiste.network.time.monotonic", monotonic)
+
+    def read_text(self: Path, encoding: str = "utf-8", errors: str | None = None) -> str:
+        if self == Path("/proc/net/dev"):
+            return "Inter-|   Receive\n face |bytes\n    lo: 0\n"
+        raise AssertionError(self)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(click.ClickException, match="timed out waiting for slirp4netns tap0"):
+        _wait_for_tap()
 
 
 def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+
     def which(name: str):
         return {
             "nft": "/usr/bin/nft",
@@ -453,12 +499,29 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     captured: dict = {}
 
-    def fake_run(args, check=False, **_kwargs):
+    def fake_popen(args, **_kwargs):
         captured["args"] = list(args)
-        return MagicMock(returncode=3)
+        proc = MagicMock()
+        proc.pid = 42
+        proc.poll.return_value = None
+        proc.wait.return_value = 3
+        return proc
+
+    def fake_slirp(binary, *, target_pid, userns_path):
+        captured["slirp"] = (binary, target_pid, userns_path)
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        return proc
+
+    def fake_readlink(path: str) -> str:
+        if "/self/" in path:
+            return "host"
+        return "guest"
 
     monkeypatch.setattr("buddelkiste.network.which", which)
-    monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
+    monkeypatch.setattr("buddelkiste.network.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("buddelkiste.network.start_slirp4netns", fake_slirp)
+    monkeypatch.setattr("buddelkiste.network.os.readlink", fake_readlink)
     code = run_bwrap(
         ["bwrap", "--unshare-all", "--", "true"],
         NetworkConfig(mode="filter"),
@@ -466,6 +529,11 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert code == 3
     assert captured["args"][0] == "unshare"
     assert "--start-slirp" in captured["args"]
+    assert captured["slirp"] == (
+        "/usr/bin/slirp4netns",
+        42,
+        "/proc/42/ns/user",
+    )
 
     monkeypatch.setattr(
         "buddelkiste.network.which",
