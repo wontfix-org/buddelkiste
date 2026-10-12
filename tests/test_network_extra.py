@@ -333,6 +333,52 @@ def test_run_network_inner_stub_resolver_starts_proxy(
     assert "nameserver 127.0.0.1" in captured["resolv"]
 
 
+def test_run_network_inner_stub_resolver_uses_uplink_via_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uplink resolvers must not skip the proxy when the sandbox file is a stub.
+
+    ``nameserver_ips()`` includes systemd-resolved's uplink list, but glibc
+    inside the sandbox still reads ``/etc/resolv.conf``. If that file is only
+    ``127.0.0.53``, the proxy has to run and forward to the uplink first.
+    """
+    monkeypatch.setattr(
+        "buddelkiste.network.which",
+        lambda name: f"/bin/{name}",
+    )
+    monkeypatch.setattr(
+        "buddelkiste.network.resolv_conf_nameservers", lambda path=None: ["127.0.0.53/32"]
+    )
+    monkeypatch.setattr("buddelkiste.network.nameserver_ips", lambda: ["172.16.0.1"])
+    monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
+    monkeypatch.setattr("buddelkiste.network.preseed_host_allows", lambda hosts: None)
+
+    proxy = MagicMock(spec=DnsProxy)
+    created: dict = {}
+
+    def make_proxy(**kwargs):
+        created.update(kwargs)
+        return proxy
+
+    monkeypatch.setattr("buddelkiste.network.DnsProxy", make_proxy)
+
+    def spawn(args):
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        return proc
+
+    monkeypatch.setattr("buddelkiste.network.spawn_bwrap_dropped", spawn)
+
+    code = run_network_inner(
+        NetworkConfig(mode="filter", policy="allow"),
+        ["bwrap", "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf", "--", "true"],
+        start_slirp=False,
+    )
+    assert code == 0
+    proxy.start.assert_called_once()
+    assert created["upstreams"][:3] == ["172.16.0.1", "1.1.1.1", "8.8.8.8"]
+
+
 def test_run_network_inner_with_proxy_and_slirp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

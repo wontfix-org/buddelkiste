@@ -441,6 +441,16 @@ def _nameserver_ips_from(path: Path) -> list[str]:
     return ips
 
 
+def sandbox_nameservers(path: Path | None = None) -> list[str]:
+    """Non-loopback nameservers in the resolv.conf the sandbox inherits.
+
+    glibc reads ``/etc/resolv.conf`` only. systemd-resolved's uplink list is
+    not part of that file, so a stub entry (``127.0.0.53``) means the sandbox
+    has no usable resolver until the DNS proxy replaces it.
+    """
+    return _nameserver_ips_from(path or Path("/etc/resolv.conf"))
+
+
 def nameserver_ips(
     path: Path | None = None,
     *,
@@ -735,11 +745,13 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
 
-        # Hostname rules need the proxy so answers can update nft. A resolv.conf
-        # that only lists a loopback stub (systemd-resolved 127.0.0.53) leaves
-        # nameserver_ips() empty: that stub is unreachable with pasta's
-        # --map-host-loopback none, so use the same proxy and public fallbacks.
-        use_proxy = net.needs_dns_proxy or not upstreams
+        # Hostname rules need the proxy so answers can update nft. The sandbox
+        # inherits /etc/resolv.conf, which on systemd-resolved is only the
+        # loopback stub. That stub is unreachable with pasta's
+        # --map-host-loopback none. Uplink addresses from
+        # /run/systemd/resolve/resolv.conf still belong in ``upstreams`` (the
+        # proxy forwards to them) but they are not what glibc will query.
+        use_proxy = net.needs_dns_proxy or not sandbox_nameservers()
         if use_proxy:
             # Host resolvers first so split-DNS names (corporate zones the
             # public resolvers answer NXDOMAIN for) still resolve. Public

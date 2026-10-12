@@ -34,14 +34,22 @@ def test_filter_allows_listed_ip(run_bk) -> None:
 
 @pytest.mark.requires_outbound
 def test_filter_denies_unlisted_ip(run_bk) -> None:
+    """Deny policy drops a public address that is not on the allow list.
+
+    Default policy is allow, so this case has to opt into deny. 8.8.8.8 is
+    not a usable target: with a stub resolv.conf the DNS proxy treats it as
+    an upstream and auto-allows it. 9.9.9.9 is neither allowed nor a fallback.
+    """
     proc = run_bk(
+        "--net-policy",
+        "deny",
         "--net-allow",
         "1.1.1.1/32",
         "--",
         "/usr/bin/python3",
         "-c",
         "import socket; "
-        "socket.create_connection(('8.8.8.8', 443), 3)",
+        "socket.create_connection(('9.9.9.9', 443), 3)",
     )
     assert proc.returncode != 0
     # Connection should fail before printing success.
