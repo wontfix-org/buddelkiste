@@ -21,13 +21,13 @@ from buddelkiste.features import (
     feature_binds,
     feature_env_var_names,
     format_features_help,
-    home_binds,
     interpolate_env,
     load_entry_point_features,
     load_feature_registry,
     python_binds,
     resolve_features,
     rust_binds,
+    user_binds,
     xdg_open_binds,
 )
 
@@ -43,10 +43,10 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "dbus" in FEATURES
     assert "dbus-proxy" in FEATURES
     assert "xdg-open" in FEATURES
-    assert "home" in FEATURES
-    assert "user" not in FEATURES
-    assert "locale" in FEATURES
-    assert "term" in FEATURES
+    assert "user" in FEATURES
+    assert "home" not in FEATURES
+    assert "locale" not in FEATURES
+    assert "term" not in FEATURES
     # Type-oriented names should not be features.
     assert "gpu" not in FEATURES
     assert "audio" not in FEATURES
@@ -54,12 +54,12 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "devtools" not in FEATURES
 
 
-def test_resolve_features_defaults_only_home() -> None:
+def test_resolve_features_defaults_only_user() -> None:
     enabled = resolve_features({})
     registry = load_feature_registry({})
     for name, feature in registry.items():
         assert enabled[name] is feature.default
-    assert enabled["home"] is True
+    assert enabled["user"] is True
     assert enabled["docker-proxy"] is False
     assert enabled["docker-instance"] is False
     assert enabled["docker"] is False
@@ -75,7 +75,7 @@ def test_resolve_features_config_table_and_cli_precedence() -> None:
     assert enabled["gui"] is False
     assert enabled["python"] is True  # CLI enable wins over config
     assert enabled["ssh"] is False
-    assert enabled["home"] is True  # still the only default-on feature
+    assert enabled["user"] is True  # still the only default-on feature
     assert enabled["cursor"] is False
 
 
@@ -350,7 +350,7 @@ def test_topic_bind_helpers(
         getattr(b, "source", None) == "/usr/libexec/flatpak-xdg-utils/xdg-open"
         for b in xdg_open_binds()
     )
-    home_sources = {getattr(b, "source", None) for b in home_binds()}
+    home_sources = {getattr(b, "source", None) for b in user_binds()}
     assert str(home / ".local") in home_sources
     assert str(home / ".cache") in home_sources
 
@@ -467,7 +467,7 @@ def test_user_and_xdg_open_features(
     assert str(home / ".cache") not in sources_off
     assert "/usr/libexec/flatpak-xdg-utils/xdg-open" not in sources_off
 
-    enabled["home"] = True
+    enabled["user"] = True
     enabled["xdg-open"] = True
     sources_on = {getattr(b, "source", None) for b in feature_binds(enabled)}
     assert str(home / ".local") in sources_on
@@ -475,7 +475,7 @@ def test_user_and_xdg_open_features(
     assert "/usr/libexec/flatpak-xdg-utils/xdg-open" in sources_on
 
 
-def test_locale_and_term_env_features() -> None:
+def test_user_feature_shares_locale_and_term() -> None:
     enabled = {name: False for name in FEATURE_NAMES}
     names_off = feature_env_var_names(enabled)
     assert "LANG" not in names_off
@@ -483,8 +483,7 @@ def test_locale_and_term_env_features() -> None:
     assert "EDITOR" not in names_off
     assert "HOME" in names_off  # base
 
-    enabled["locale"] = True
-    enabled["term"] = True
+    enabled["user"] = True
     names_on = feature_env_var_names(enabled)
     assert "LANG" in names_on
     assert "LC_NUMERIC" in names_on
@@ -538,16 +537,17 @@ def test_format_features_help_lists_topics() -> None:
     assert "rust" in text
     assert "gui" in text
     assert "xdg-open" in text
-    assert "home" in text
-    assert "locale" in text
-    assert "term" in text
-    assert "default: on" in text  # home
+    assert "user" in text
+    assert "default: on" in text  # user
     assert "default: off" in text
     assert "buddelkiste.features:CURSOR" in text
     assert "buddelkiste.features:PYTHON" in text
     assert "buddelkiste.features:RUST" in text
-    assert "buddelkiste.features:HOME" in text
+    assert "buddelkiste.features:USER" in text
     assert "buddelkiste.features:DBUS_PROXY" in text
+    assert "buddelkiste.features:HOME" not in text
+    assert "buddelkiste.features:LOCALE" not in text
+    assert "buddelkiste.features:TERM" not in text
 
 
 def test_entry_point_features_include_builtins() -> None:

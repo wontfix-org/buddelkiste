@@ -28,7 +28,7 @@ bk docker-policy approve   # or: deny [id|image]
 bk shims install
 bk shims check
 
-# Topic features (only ``home`` on by default)
+# Topic features (only ``user`` on by default)
 bk run --feature python --feature ssh python myscript.py
 bk run --feature cursor --feature gui cursor-agent
 
@@ -51,7 +51,7 @@ Everything else is the sandboxed command.
 
 ## Features
 
-Optional permission sets are grouped by topic. Only **`home`** is enabled by
+Optional permission sets are grouped by topic. Only **`user`** is enabled by
 default; every other built-in is opt-in. Toggle with CLI flags or config; see
 `bk list-features` for the live catalog (including each feature's module path).
 
@@ -67,15 +67,13 @@ default; every other built-in is opt-in. Toggle with CLI flags or config; see
 | `git` | `~/.gitconfig`, `~/.config/git` |
 | `google` | `/opt/google` |
 | `gui` | display, GPU, audio, fonts, related env |
-| `home` | `~/.local` (ro), `~/.cache` (rw) — **default on** |
 | `java` | OpenJDK `/etc/java-*-openjdk` configs |
-| `locale` | `LANG`, `LC_NUMERIC`, `LC_TIME` |
 | `node` | npm/nvm/bun paths, `BUN_INSTALL` |
 | `nvim` | `~/nvim` |
 | `python` | pip/virtualenv paths and env |
 | `rust` | shared `~/.cargo` / `~/.rustup` (or `CARGO_HOME` / `RUSTUP_HOME`) |
 | `ssh` | `~/.ssh/config` plus a dedicated agent with `~/.ssh/sandbox_*` keys |
-| `term` | `TERM`, `TERMINFO`, `COLORTERM`, `TERM_PROGRAM`, `EDITOR` |
+| `user` | `~/.local` (ro), `~/.cache` (rw), locale and terminal env (`LANG`, `LC_*`, `TERM`, `EDITOR`, …) — **default on** |
 | `xdg-open` | host `xdg-open` via flatpak-xdg-utils |
 
 ### CLI
@@ -145,7 +143,7 @@ path) so the sandboxed command cannot read it.
 ```toml
 # Global allowlist (exactly these features), or use a table of overrides:
 # features = { gui = false, google = false }
-features = ["home", "git", "ssh", "python", "rust", "term", "locale"]
+features = ["user", "git", "ssh", "python", "rust"]
 
 [feature.zig]
 description = "Zig toolchain cache"
@@ -165,7 +163,7 @@ source = "${HOME}/.cache/zig"
 mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays/<hash>
 
 [executables.cursor-agent]
-features = ["cursor", "git", "ssh", "gui", "dbus", "xdg-open", "term"]
+features = ["user", "cursor", "git", "ssh", "gui", "dbus", "xdg-open"]
 args = ["--force"]
 
 [executables.cursor-agent.network]

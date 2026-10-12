@@ -123,7 +123,7 @@ def xdg_open_binds() -> list:
     ]
 
 
-def home_binds() -> list:
+def user_binds() -> list:
     home = _home()
     return [
         ROBindConfig(home / ".local"),
@@ -546,24 +546,22 @@ XDG_OPEN = Feature(
     binds=xdg_open_binds,
     origin="buddelkiste.features:XDG_OPEN",
 )
-HOME = Feature(
-    name="home",
-    description="User ~/.local (ro) and ~/.cache (rw)",
+USER = Feature(
+    name="user",
+    description="Home directories plus locale and terminal environment",
     default=True,
-    binds=home_binds,
-    origin="buddelkiste.features:HOME",
-)
-LOCALE = Feature(
-    name="locale",
-    description="Locale environment variables",
-    env_vars=("LANG", "LC_NUMERIC", "LC_TIME"),
-    origin="buddelkiste.features:LOCALE",
-)
-TERM = Feature(
-    name="term",
-    description="Terminal and editor environment variables",
-    env_vars=("COLORTERM", "EDITOR", "TERM", "TERMINFO", "TERM_PROGRAM"),
-    origin="buddelkiste.features:TERM",
+    env_vars=(
+        "COLORTERM",
+        "EDITOR",
+        "LANG",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "TERM",
+        "TERMINFO",
+        "TERM_PROGRAM",
+    ),
+    binds=user_binds,
+    origin="buddelkiste.features:USER",
 )
 
 
@@ -638,9 +636,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             DBUS,
             DBUS_PROXY,
             XDG_OPEN,
-            HOME,
-            LOCALE,
-            TERM,
+            USER,
         )
     }
 

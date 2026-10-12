@@ -30,8 +30,8 @@ can be inspected.
 
 # Features
 
-Optional permission sets are grouped by topic (home, cursor, python, ssh, ...).
-Only ``home`` is on by default; other built-ins are opt-in. Features are
+Optional permission sets are grouped by topic (user, cursor, python, ssh, ...).
+Only ``user`` is on by default; other built-ins are opt-in. Features are
 registered via the buddelkiste.features entry-point group (third-party packages
 can add more). Toggle with --feature / --no-feature, or in config. Define
 pure-TOML features under [feature.<name>]. Use `bk list-features` to print the

@@ -193,24 +193,18 @@ def test_get_env_args_shares_known_vars(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("TERM", "xterm-test")
     monkeypatch.setenv("HOME", "/tmp/bk-home-test")
     monkeypatch.delenv("ASDF_DIR", raising=False)
-    # Default features: only ``home`` (no TERM). Opt in ``term`` for TERM.
+    # ``user`` is on by default, so TERM is shared. Turning it off drops TERM.
     args = list(get_env_args({}))
     assert ["--setenv", "HOME", "/tmp/bk-home-test"] in [
         args[i : i + 3] for i in range(0, len(args), 3)
     ]
-    assert "TERM" not in args
+    assert ["--setenv", "TERM", "xterm-test"] in [
+        args[i : i + 3] for i in range(0, len(args), 3)
+    ]
     assert "ASDF_DIR" not in args
 
-    with_term = list(get_env_args({"features": {"term": True}}))
-    term = next(
-        (
-            with_term[i : i + 3]
-            for i in range(0, len(with_term), 3)
-            if with_term[i + 1] == "TERM"
-        ),
-        None,
-    )
-    assert term == ["--setenv", "TERM", "xterm-test"]
+    without_user = list(get_env_args({"features": {"user": False}}))
+    assert "TERM" not in without_user
 
 
 def test_get_env_args_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
