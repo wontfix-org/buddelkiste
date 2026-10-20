@@ -526,8 +526,8 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
         proc.wait.return_value = 3
         return proc
 
-    def fake_slirp(binary, *, target_pid, userns_path):
-        captured["slirp"] = (binary, target_pid, userns_path)
+    def fake_slirp(binary, *, target_pid, userns_path, host_loopback=False):
+        captured["slirp"] = (binary, target_pid, userns_path, host_loopback)
         proc = MagicMock()
         proc.poll.return_value = 0
         return proc
@@ -552,6 +552,7 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
         "/usr/bin/slirp4netns",
         42,
         "/proc/42/ns/user",
+        False,
     )
 
     monkeypatch.setattr(

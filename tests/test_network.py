@@ -19,6 +19,7 @@ from buddelkiste.network import (
     run_bwrap,
     with_share_net,
 )
+from buddelkiste.published_ports import published_tcp_ports
 
 
 def test_canonicalize_cidr_accepts_ip_and_prefix() -> None:
@@ -259,6 +260,24 @@ def test_build_nft_ruleset_allowlist() -> None:
     assert "172.16.0.1/32" in punched
 
 
+def test_build_nft_ruleset_punches_published_port_gateway() -> None:
+    rules = build_nft_ruleset(
+        NetworkConfig(mode="filter", policy="allow"),
+        port_gateway="169.254.255.254",
+    )
+    chain = rules.split("chain output", 1)[1]
+    assert "169.254.255.254/32" in rules
+    assert chain.index("tcp dport @fwd_ports accept") < chain.index("@deny4 reject")
+
+    slirp = build_nft_ruleset(
+        NetworkConfig(mode="filter", policy="allow", deny=["10.0.0.0/8"]),
+        port_gateway="10.0.2.2",
+    )
+    assert slirp.count("10.0.0.0/8") == 1
+    assert "10.0.2.2/32" not in slirp
+    assert "ip daddr 10.0.2.2 tcp dport @fwd_ports accept" in slirp
+
+
 def test_build_nft_ruleset_denylist_policy_allow() -> None:
     net = NetworkConfig(mode="filter", policy="allow", deny=["10.0.0.0/8"])
     rules = build_nft_ruleset(net)
@@ -367,4 +386,55 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "--map-host-loopback" in captured["args"]
     assert "none" in captured["args"]
     assert captured["args"][captured["args"].index("--") + 1] == "/bin/sh"
+
+
+def test_run_bwrap_filter_maps_host_loopback_for_docker_ports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+
+    def which(name: str):
+        return {
+            "nft": "/usr/bin/nft",
+            "setpriv": "/usr/bin/setpriv",
+            "pasta": "/usr/bin/pasta",
+        }.get(name)
+
+    captured: dict = {}
+
+    def fake_run(args, check=False, **kwargs):
+        captured["args"] = list(args)
+        captured["env"] = kwargs.get("env") or {}
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("buddelkiste.network.which", which)
+    monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
+
+    code = run_bwrap(
+        [
+            "bwrap",
+            "--unshare-all",
+            "--setenv",
+            "DOCKER_HOST",
+            "unix:///run/user/1000/bdi1/bk-dp-1.sock",
+            "--",
+            "true",
+        ],
+        NetworkConfig(mode="filter"),
+    )
+    assert code == 0
+    gateway = captured["args"][captured["args"].index("--map-host-loopback") + 1]
+    assert gateway == "169.254.255.254"
+    assert captured["env"]["BUDDELKISTE_HOST_PORT_GATEWAY"] == gateway
+    assert captured["env"]["BUDDELKISTE_DOCKER_HOST"].endswith("bk-dp-1.sock")
     assert "buddelkiste.network_inner" in captured["args"]
+
+
+def test_published_tcp_ports_reads_host_bindings() -> None:
+    body = (
+        b'[{"Ports":[{"IP":"0.0.0.0","PrivatePort":22,"PublicPort":32768,"Type":"tcp"},'
+        b'{"IP":"::","PrivatePort":22,"PublicPort":32768,"Type":"tcp"},'
+        b'{"PrivatePort":22,"Type":"tcp"}]}]'
+    )
+    assert published_tcp_ports(body) == {32768}
+    assert published_tcp_ports(b"not-json") == set()

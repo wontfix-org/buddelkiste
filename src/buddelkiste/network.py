@@ -39,6 +39,14 @@ from buddelkiste.dns_proxy import (
     nft_add_allow_ip,
 )
 from buddelkiste.features import lookup_executable_config
+from buddelkiste.published_ports import (
+    DOCKER_HOST_ENV,
+    PASTA_PORT_GATEWAY,
+    PORT_GATEWAY_ENV,
+    SLIRP_PORT_GATEWAY,
+    PublishedPortRelay,
+    sandbox_docker_host,
+)
 from buddelkiste.which import path_with_tools, which
 
 log = logging.getLogger(__name__)
@@ -539,18 +547,38 @@ def split_families(cidrs: Sequence[str]) -> tuple[list[str], list[str]]:
     return _collapsed_v4_text(v4_nets), _collapsed_v6_text(v6_nets)
 
 
+def _deny_covers(deny: Sequence[str], addr: str) -> bool:
+    """True when ``addr`` is already inside one of the deny CIDRs."""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    for cidr in deny:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def build_nft_ruleset(
     net: NetworkConfig,
     *,
     extra_allow: Sequence[str] = (),
     dns_allow: Sequence[str] = (),
     dns_proxy: bool = False,
+    port_gateway: str | None = None,
 ) -> str:
     """Build an nftables ruleset for the sandbox netns."""
     allow = list(dict.fromkeys([*extra_allow, *net.allow]))
     if dns_proxy:
         allow = list(dict.fromkeys([*allow, "127.0.0.1/32"]))
     deny = list(dict.fromkeys(net.deny))
+    # The port gateway is how the sandbox reaches host listeners for published
+    # container ports. Every other port on that address stays denied.
+    if port_gateway and not _deny_covers(deny, port_gateway):
+        deny.append(f"{port_gateway}/32")
     allow4, allow6 = split_families(allow)
     deny4, deny6 = split_families(deny)
     dns4, dns6 = split_families(dns_allow)
@@ -603,6 +631,15 @@ def build_nft_ruleset(
         "    flags interval",
         *( [f"    elements = {{ {set_elements(deny6)} }}"] if deny6 else [] ),
         "  }",
+        *(
+            [
+                "  set fwd_ports {",
+                "    type inet_service",
+                "  }",
+            ]
+            if port_gateway
+            else []
+        ),
         "  chain output {",
         f"    type filter hook output priority 0; policy {default_policy};",
         "    oifname \"lo\" accept",
@@ -616,6 +653,11 @@ def build_nft_ruleset(
         "    ip6 daddr @dns6 udp dport 53 accept",
         "    ip daddr @dyn_allow4 accept",
         "    ip6 daddr @dyn_allow6 accept",
+        *(
+            [f"    ip daddr {port_gateway} tcp dport @fwd_ports accept"]
+            if port_gateway
+            else []
+        ),
         "    ip daddr @deny4 reject",
         "    ip6 daddr @deny6 reject",
         "    ip daddr @allow4 accept",
@@ -755,6 +797,7 @@ def start_slirp4netns(
     *,
     target_pid: int | None = None,
     userns_path: str | None = None,
+    host_loopback: bool = False,
 ) -> subprocess.Popen:
     """Start slirp4netns and wait until it reports the tap is configured.
 
@@ -771,8 +814,12 @@ def start_slirp4netns(
         slirp_bin,
         "--configure",
         "--mtu=65520",
-        "--disable-host-loopback",
     ]
+    # Published container ports listen on the host. With this flag, slirp drops
+    # every connection to that loopback, including the port relay. nft still
+    # rejects every other port on 10.0.2.2.
+    if not host_loopback:
+        argv.append("--disable-host-loopback")
     if userns_path:
         argv.extend(["--userns-path", userns_path])
     argv.extend(["--ready-fd", str(write_fd), str(pid), "tap0"])
@@ -961,11 +1008,13 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
                 continue
             dns_ips.append(ip)
         dns_allow = [f"{ip}/{32 if ':' not in ip else 128}" for ip in dns_ips]
+        port_gateway = os.environ.get(PORT_GATEWAY_ENV) or None
         ruleset = build_nft_ruleset(
             net,
             extra_allow=extra_allow,
             dns_allow=dns_allow,
             dns_proxy=use_proxy and listen_port != 53,
+            port_gateway=port_gateway,
         )
         if not use_proxy:
             log.debug("DNS proxy disabled upstreams=%s", upstreams)
@@ -974,8 +1023,17 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
         if use_proxy:
             preseed_host_allows(net.allow_hosts)
 
-        proc = spawn_bwrap_dropped(bwrap_args)
-        return proc.wait()
+        port_relay: PublishedPortRelay | None = None
+        docker_host = os.environ.get(DOCKER_HOST_ENV, "")
+        try:
+            if port_gateway and docker_host.startswith("unix://"):
+                port_relay = PublishedPortRelay(docker_host, port_gateway)
+                port_relay.start()
+            proc = spawn_bwrap_dropped(bwrap_args)
+            return proc.wait()
+        finally:
+            if port_relay is not None:
+                port_relay.stop()
     finally:
         if proxy is not None:
             proxy.stop()
@@ -1043,6 +1101,12 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
         relay = start_host_dns_relay(tmp_path)
         if relay is not None:
             child_env[DNS_RELAY_ENV] = str(relay.path)
+        docker_host = sandbox_docker_host(bwrap_args)
+        port_gateway = ""
+        if docker_host:
+            port_gateway = PASTA_PORT_GATEWAY if kind == "pasta" else SLIRP_PORT_GATEWAY
+            child_env[PORT_GATEWAY_ENV] = port_gateway
+            child_env[DOCKER_HOST_ENV] = docker_host
 
         try:
             if kind == "pasta":
@@ -1055,7 +1119,7 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                     "--config-net",
                     # Newer pasta replaced --disable-host-loopback with this.
                     "--map-host-loopback",
-                    "none",
+                    port_gateway or "none",
                     "--",
                     "/bin/sh",
                     "-c",
@@ -1093,6 +1157,7 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                             helper,
                             target_pid=child.pid,
                             userns_path=f"/proc/{child.pid}/ns/user",
+                            host_loopback=bool(port_gateway),
                         )
                         break
                     time.sleep(0.02)
