@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pwd
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -93,6 +95,73 @@ def test_cli_list_features(tmp_config: Path) -> None:
     assert "buddelkiste.features:RUST" in result.output
     assert "zig" in result.output
     assert "config:[feature.zig]" in result.output
+
+
+def test_cli_info_defaults(tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["info"])
+    assert result.exit_code == 0, result.output
+    data = tomllib.loads(result.output)
+    assert data["features"]["user"] is True
+    assert data["features"]["python"] is False
+    assert data["network"]["mode"] == "filter"
+    assert data["shims"] is True
+    assert f"config: {tmp_config}" in result.output
+    assert f"cwd: {tmp_path.resolve()}" in result.output
+    assert "project: (none)" in result.output
+    assert "executable: (none)" in result.output
+
+
+def test_cli_info_merges_global_executable_and_project(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    tmp_config.write_text(
+        'features = ["user", "git"]\n'
+        "\n"
+        "[network]\n"
+        'mode = "filter"\n'
+        'allow = ["1.1.1.1/32"]\n'
+        "\n"
+        "[dbus_proxy]\n"
+        'talk = ["org.foo.Bar"]\n'
+        "\n"
+        "[feature.zig]\n"
+        'description = "Zig toolchain cache"\n'
+        "\n"
+        "[executables.python]\n"
+        "features = { python = true }\n"
+        "\n"
+        "[executables.python.network]\n"
+        'mode = "none"\n'
+        "\n"
+        "[[projects]]\n"
+        f"path = {json.dumps(str(repo))}\n"
+        "features = { rust = true }\n"
+        "\n"
+        "[[binds]]\n"
+        'source = "/tmp"\n'
+        'mode = "ro"\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["info", "/usr/bin/python"])
+    assert result.exit_code == 0, result.output
+    data = tomllib.loads(result.output)
+    assert data["features"]["user"] is True
+    assert data["features"]["git"] is True
+    assert data["features"]["python"] is True
+    assert data["features"]["rust"] is True
+    assert data["features"]["cursor"] is False
+    assert data["network"]["mode"] == "none"
+    assert data["dbus_proxy"]["talk"] == ["org.foo.Bar"]
+    assert data["feature"]["zig"]["description"] == "Zig toolchain cache"
+    assert data["binds"] == [{"source": "/tmp", "mode": "ro"}]
+    assert "executables" not in data
+    assert "projects" not in data
+    assert f"project: {repo.resolve()}" in result.output
+    assert "executable: /usr/bin/python" in result.output
 
 
 def test_cli_fails_early_when_feature_command_missing(

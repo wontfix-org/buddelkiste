@@ -6,9 +6,10 @@ import json
 import logging
 import os
 import pwd
+import re
 import sys
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import click
@@ -121,6 +122,8 @@ is always bound read-write, and an optional features list or table is applied
 after the executable's features. Nested keys such as network.mode stay on the
 same array element. Feature defaults → global features →
 executables.<name>.features → project features → --feature / --no-feature.
+`bk info [EXECUTABLE]` prints that merged view (plus resolved network and
+dbus-proxy) as TOML for the current directory.
 
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
@@ -254,8 +257,10 @@ from buddelkiste.features import (
     check_feature_requirements,
     feature_binds,
     feature_env_var_names,
+    feature_names,
     feature_setup,
     format_features_help,
+    load_feature_registry,
     lookup_executable_config,
     lookup_project_config,
     resolve_features,
@@ -268,6 +273,7 @@ from buddelkiste.network import (
 )
 from buddelkiste.shims import (
     check_shims,
+    global_shims_enabled,
     install_shim_hook,
     install_shims_from_config,
     list_shim_names,
@@ -532,6 +538,24 @@ def list_features() -> None:
 def list_net_presets() -> None:
     """List built-in and config network presets."""
     click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
+
+
+@cli.command("info")
+@click.argument("executable", required=False)
+def info(executable: str | None) -> None:
+    """Print the merged config for this directory and optional executable.
+
+    Applies feature defaults, then global ``features``, then
+    ``executables.<name>.features``, then the active ``[[projects]]`` entry.
+    Network and dbus-proxy use the same global → executable order. Output is
+    TOML of the effective tables (not the stacked source lists).
+    """
+    config = load_config()
+    cwd = Path.cwd()
+    click.echo(
+        format_effective_config(config, executable=executable, cwd=cwd),
+        nl=False,
+    )
 
 
 @cli.group("docker-policy")
@@ -924,6 +948,181 @@ def load_config() -> dict:
     return {}
 
 
+_PASSTHROUGH_SKIP = frozenset(
+    {"features", "network", "dbus_proxy", "executables", "projects"}
+)
+_TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def effective_config(
+    config: dict,
+    *,
+    executable: str | None = None,
+    cwd: Path | None = None,
+) -> dict:
+    """Return the config tables after global / executable / project overlays.
+
+    ``features`` is the resolved on/off table. ``network`` and ``dbus_proxy``
+    are the values ``bk run`` would use for this executable (no CLI flags).
+    ``executables`` and ``projects`` are omitted; they have already been applied.
+    Other top-level keys are copied from ``config``.
+    """
+    from buddelkiste.dbus_proxy import resolve_dbus_proxy
+
+    registry = load_feature_registry(config)
+    enabled = resolve_features(config, executable=executable, cwd=cwd)
+    net = resolve_network(config, executable=executable)
+    dbus = resolve_dbus_proxy(config, executable=executable)
+
+    network_table: dict[str, object] = {
+        "mode": net.mode,
+        "policy": net.policy,
+        "allow": list(net.allow),
+        "deny": list(net.deny),
+        "allow_presets": list(net.allow_presets),
+        "deny_presets": list(net.deny_presets),
+        "allow_hosts": list(net.allow_hosts),
+        "deny_hosts": list(net.deny_hosts),
+    }
+    network = config.get("network")
+    if isinstance(network, dict) and isinstance(network.get("presets"), dict):
+        network_table["presets"] = dict(network["presets"])
+
+    merged: dict = {
+        "shims": global_shims_enabled(config),
+        "features": {name: bool(enabled.get(name)) for name in feature_names(registry)},
+        "network": network_table,
+    }
+
+    if dbus.filtered:
+        merged["dbus_proxy"] = {
+            "see": list(dbus.see),
+            "talk": list(dbus.talk),
+            "own": list(dbus.own),
+            "call": list(dbus.call),
+            "broadcast": list(dbus.broadcast),
+        }
+
+    for key, value in config.items():
+        if key in _PASSTHROUGH_SKIP or key == "shims":
+            continue
+        merged[key] = value
+    return merged
+
+
+def format_effective_config(
+    config: dict,
+    *,
+    executable: str | None = None,
+    cwd: Path | None = None,
+) -> str:
+    """TOML dump of the merged config with source comments."""
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    project = lookup_project_config(config, cwd=here)
+    comments = [
+        f"config: {config_path()}",
+        f"cwd: {here}",
+        f"project: {project[0] if project is not None else '(none)'}",
+        f"executable: {executable if executable else '(none)'}",
+    ]
+    return format_toml_document(
+        effective_config(config, executable=executable, cwd=here),
+        comments=comments,
+    )
+
+
+def format_toml_document(
+    data: Mapping[str, object],
+    *,
+    comments: Sequence[str] = (),
+) -> str:
+    """Serialize a mapping to a TOML document (scalars, tables, array-of-tables)."""
+    lines = [f"# {line}" for line in comments]
+    if comments:
+        lines.append("")
+    _emit_toml_table(lines, data, header=())
+    text = "\n".join(lines).rstrip()
+    return text + "\n"
+
+
+def _toml_key(key: str) -> str:
+    if _TOML_BARE_KEY.match(key):
+        return key
+    return json.dumps(key)
+
+
+def _toml_inline(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, Path):
+        return json.dumps(str(value))
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, Mapping):
+        items = ", ".join(
+            f"{_toml_key(str(key))} = {_toml_inline(item)}" for key, item in value.items()
+        )
+        return f"{{ {items} }}" if items else "{}"
+    if isinstance(value, (list, tuple)):
+        items = ", ".join(_toml_inline(item) for item in value)
+        return f"[{items}]"
+    raise TypeError(f"unsupported TOML value: {type(value).__name__}")
+
+
+def _is_array_of_tables(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, Mapping) for item in value)
+    )
+
+
+def _emit_toml_table(
+    lines: list[str],
+    table: Mapping[str, object],
+    *,
+    header: tuple[str, ...],
+) -> None:
+    scalars: list[tuple[str, object]] = []
+    nested: list[tuple[str, Mapping[str, object]]] = []
+    arrays_of_tables: list[tuple[str, list]] = []
+    for key, value in table.items():
+        if value is None:
+            continue
+        if isinstance(value, list) and _is_array_of_tables(value):
+            arrays_of_tables.append((key, value))
+        elif isinstance(value, Mapping):
+            nested.append((key, value))
+        else:
+            scalars.append((key, value))
+
+    if header:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("[" + ".".join(_toml_key(part) for part in header) + "]")
+
+    for key, value in scalars:
+        lines.append(f"{_toml_key(key)} = {_toml_inline(value)}")
+
+    for key, value in nested:
+        _emit_toml_table(lines, value, header=(*header, key))
+
+    dotted = ".".join(_toml_key(part) for part in header)
+    for key, items in arrays_of_tables:
+        name = f"{dotted}.{_toml_key(key)}" if dotted else _toml_key(key)
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append(f"[[{name}]]")
+            _emit_toml_table(lines, item, header=())
+
+
 def get_binds(
     config: dict,
     enabled: dict[str, bool] | None = None,
@@ -1153,11 +1352,14 @@ __all__ = [
     "bind_config",
     "cli",
     "cwd_is_covered",
+    "effective_config",
     "ensure_cwd_project",
     "find_sandbox_ssh_key",
+    "format_effective_config",
     "get_bind_args",
     "get_binds",
     "get_env_args",
+    "info",
     "list_features",
     "list_net_presets",
     "load_config",

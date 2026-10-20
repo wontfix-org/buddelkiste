@@ -10,7 +10,9 @@ from buddelkiste.cli import (
     RWBindConfig,
     add_bind_to_config,
     add_project_to_config,
+    effective_config,
     ensure_cwd_project,
+    format_toml_document,
     get_binds,
     get_env_args,
     load_config,
@@ -86,6 +88,54 @@ def test_merge_config_concatenates_lists_and_overrides_features() -> None:
         "mode": "none",
         "allow": ["1.1.1.1/32"],
     }
+
+
+def test_effective_config_applies_layers(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "features": ["user", "git"],
+        "network": {"mode": "filter", "allow": ["1.1.1.1/32"]},
+        "dbus_proxy": {"talk": ["org.foo.Bar"]},
+        "executables": {
+            "python": {
+                "features": {"python": True},
+                "network": {"mode": "none"},
+            }
+        },
+        "projects": [{"path": str(repo), "features": {"rust": True}}],
+        "binds": [{"source": "/tmp", "mode": "ro"}],
+    }
+    merged = effective_config(config, executable="python", cwd=repo)
+    assert merged["features"]["user"] is True
+    assert merged["features"]["git"] is True
+    assert merged["features"]["python"] is True
+    assert merged["features"]["rust"] is True
+    assert merged["features"]["ssh"] is False
+    assert merged["network"]["mode"] == "none"
+    assert merged["dbus_proxy"]["talk"] == ["org.foo.Bar"]
+    assert merged["binds"] == [{"source": "/tmp", "mode": "ro"}]
+    assert "executables" not in merged
+    assert "projects" not in merged
+
+
+def test_format_toml_document_roundtrip() -> None:
+    text = format_toml_document(
+        {
+            "shims": True,
+            "features": {"user": True, "dbus-proxy": False},
+            "quoted key": "value",
+            "binds": [{"source": "/tmp", "mode": "ro"}],
+        },
+        comments=["cwd: /tmp"],
+    )
+    assert text.startswith("# cwd: /tmp\n")
+    data = tomllib.loads(text)
+    assert data["shims"] is True
+    assert data["features"]["user"] is True
+    assert data["features"]["dbus-proxy"] is False
+    assert data["quoted key"] == "value"
+    assert data["binds"] == [{"source": "/tmp", "mode": "ro"}]
 
 
 def test_merge_config_concatenates_projects() -> None:
