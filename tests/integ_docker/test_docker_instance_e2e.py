@@ -195,10 +195,7 @@ def test_instance_build_and_run_under_project_jail(
             cwd=project,
         )
         if build.returncode != 0:
-            combined = build.stdout + build.stderr
-            if "network" in combined.lower() or "timeout" in combined.lower():
-                pytest.skip(f"build needs network: {combined[-500:]}")
-            pytest.fail(combined)
+            pytest.fail(build.stdout + build.stderr)
         run_proc = _docker(
             host,
             "run",
@@ -223,10 +220,9 @@ def test_instance_container_dns_resolves(
     )
     with docker_instance_setup(instance=cfg, runtime_dir=run / "dns") as args:
         host = _docker_host_from_args(args)
-        # Pull may need network; skip offline rather than fail the suite.
         pull = _docker(host, "pull", ALPINE, timeout=180)
         if pull.returncode != 0:
-            pytest.skip(f"pull needs network: {(pull.stdout + pull.stderr)[-300:]}")
+            pytest.fail(f"pull failed: {pull.stdout + pull.stderr}")
         proc = _docker(
             host,
             "run",
@@ -314,10 +310,7 @@ def test_instance_buildkit_cli_build(
             cwd=project,
         )
         if build.returncode != 0:
-            combined = build.stdout + build.stderr
-            if "network" in combined.lower() or "timeout" in combined.lower():
-                pytest.skip(f"build needs network: {combined[-500:]}")
-            pytest.fail(combined)
+            pytest.fail(build.stdout + build.stderr)
         run_proc = _docker(host, "run", "--rm", "bk-instance-buildkit:latest", "cat", "/marker")
         assert run_proc.returncode == 0, run_proc.stderr + run_proc.stdout
         assert "built-with-buildkit" in run_proc.stdout
