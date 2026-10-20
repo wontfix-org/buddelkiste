@@ -27,6 +27,7 @@ bk docker-policy approve   # or: deny [id|image]
 # PATH shims for configured [executables.*]
 bk shims install
 bk shims check
+bk shims list
 
 # Topic features (only ``user`` on by default)
 bk run --feature python --feature ssh python myscript.py
@@ -288,6 +289,7 @@ shim = false
 bk shims install   # create/update/remove shims and the shell hook
 bk shims check     # warn if an original binary appears earlier on PATH
 bk shims check -q  # warnings only (used by the startup snippet)
+bk shims list      # configured/installed shims and the binaries they wrap
 ```
 
 `bk shims check` exits non-zero when something would bypass the sandbox.

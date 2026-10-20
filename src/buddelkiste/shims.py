@@ -232,6 +232,74 @@ def _is_executable(path: Path) -> bool:
         return False
 
 
+def resolve_shim_target(
+    name: str,
+    *,
+    bin_dir: Path | None = None,
+    path_value: str | None = None,
+) -> Path | None:
+    """First executable named ``name`` on PATH outside the shim directory.
+
+    Matches the PATH walk in :func:`render_shim` (skip the shim dir, require a
+    regular executable file).
+    """
+    target_dir = bin_dir if bin_dir is not None else shim_dir()
+    for directory in _path_entries(path_value):
+        if _same_path(directory, target_dir):
+            continue
+        candidate = directory / name
+        if _is_executable(candidate):
+            return candidate
+    return None
+
+
+def installed_shim_names(*, bin_dir: Path | None = None) -> list[str]:
+    """Basenames of managed shim files under the shim directory."""
+    target_dir = bin_dir if bin_dir is not None else shim_dir()
+    if not target_dir.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(target_dir.iterdir(), key=lambda item: item.name):
+        if path.is_file() and is_our_shim(path):
+            names.append(path.name)
+    return names
+
+
+def list_shim_names(
+    config: dict,
+    *,
+    bin_dir: Path | None = None,
+) -> list[str]:
+    """Configured enabled names, then extra installed shims not in config."""
+    names = shim_names_from_config(config)
+    seen = set(names)
+    extras = [name for name in installed_shim_names(bin_dir=bin_dir) if name not in seen]
+    return [*names, *extras]
+
+
+@dataclass(frozen=True)
+class ShimListing:
+    name: str
+    target: Path | None
+
+
+def list_shims(
+    names: list[str],
+    *,
+    bin_dir: Path | None = None,
+    path_value: str | None = None,
+) -> list[ShimListing]:
+    """Resolve the host binary each shim would exec."""
+    target_dir = bin_dir if bin_dir is not None else shim_dir()
+    return [
+        ShimListing(
+            name,
+            resolve_shim_target(name, bin_dir=target_dir, path_value=path_value),
+        )
+        for name in names
+    ]
+
+
 def upsert_rc_hook(path: Path, block: str) -> str:
     """Insert or replace the marked hook block in an existing rc file."""
     text = path.read_text(encoding="utf-8")

@@ -20,9 +20,12 @@ from buddelkiste.shims import (
     install_shims,
     install_shims_from_config,
     is_our_shim,
+    list_shim_names,
+    list_shims,
     render_rc_include,
     render_shim,
     render_shim_env,
+    resolve_shim_target,
     shim_decisions_from_config,
     shim_dir,
     shim_dir_on_path,
@@ -450,3 +453,75 @@ def test_cli_shims_check_quiet_hides_empty_config(
     quiet = CliRunner().invoke(cli, ["shims", "check", "-q"])
     assert quiet.exit_code == 0, quiet.output
     assert quiet.output == ""
+
+
+def test_resolve_shim_target_skips_shim_dir(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    real_dir = tmp_path / "real"
+    install_shims(["tool"], bin_dir=wrappers)
+    real_dir.mkdir()
+    real = real_dir / "tool"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+
+    path = f"{wrappers}:{real_dir}"
+    assert resolve_shim_target("tool", bin_dir=wrappers, path_value=path) == real
+    assert resolve_shim_target("tool", bin_dir=wrappers, path_value=str(wrappers)) is None
+
+
+def test_list_shim_names_includes_leftover_installed(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    install_shims(["keep", "extra"], bin_dir=wrappers)
+    names = list_shim_names(
+        {"executables": {"keep": {}, "off": {"shim": False}}},
+        bin_dir=wrappers,
+    )
+    assert names == ["keep", "extra"]
+    listings = {row.name: row.target for row in list_shims(names, bin_dir=wrappers)}
+    assert listings["keep"] is None
+    assert listings["extra"] is None
+
+
+def test_cli_shims_list_empty(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    tmp_config.write_text("", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["shims", "list"])
+    assert result.exit_code == 0, result.output
+    assert "No shims." in result.output
+
+
+def test_cli_shims_list_shows_real_executable(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real = real_dir / "cursor-agent"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+    wrappers = home / ".local" / "share" / "buddelkiste" / "shims"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", f"{wrappers}:{real_dir}")
+    tmp_config.write_text(
+        "[executables.cursor-agent]\nfeatures = [\"cursor\"]\n"
+        "[executables.missing]\nfeatures = []\n",
+        encoding="utf-8",
+    )
+    CliRunner().invoke(cli, ["shims", "install"])
+
+    result = CliRunner().invoke(cli, ["shims", "list"])
+    assert result.exit_code == 0, result.output
+    assert f"cursor-agent  {real}" in result.output
+    assert "missing       -" in result.output

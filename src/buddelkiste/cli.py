@@ -46,7 +46,8 @@ in $XDG_DATA_HOME/buddelkiste/shims that runs the real binary via `bk run`.
 Install also writes a POSIX snippet and sources it from existing ~/.bashrc
 and ~/.zshrc so interactive shells prepend that directory and run
 `bk shims check --quiet`. Use `bk shims check` to detect originals that
-shadow those shims on PATH.
+shadow those shims on PATH. `bk shims list` prints each shim and the
+host binary it would run.
 
 
 # Network
@@ -269,6 +270,8 @@ from buddelkiste.shims import (
     check_shims,
     install_shim_hook,
     install_shims_from_config,
+    list_shim_names,
+    list_shims,
     shim_decisions_from_config,
     shim_dir,
     shim_dir_on_path,
@@ -740,11 +743,12 @@ def shims_group() -> None:
     ``~/.local/share/buddelkiste/shims``) that runs ``bk run <real-binary>``
     with the caller's arguments. ``install`` also writes a POSIX snippet and
     sources it from existing ``~/.bashrc`` / ``~/.zshrc`` so interactive
-    shells prepend that directory and run ``bk shims check --quiet``. Control
-    with top-level ``shims = true/false`` (default true) and per-entry
-    ``shim = true/false``. Shims carry a ``# buddelkiste-shim:`` marker so
-    ``install`` can refresh or remove our own files without clobbering
-    unrelated binaries of the same name.
+    shells prepend that directory and run ``bk shims check --quiet``.
+    ``list`` prints each configured or leftover shim and the host binary it
+    would exec. Control with top-level ``shims = true/false`` (default true)
+    and per-entry ``shim = true/false``. Shims carry a
+    ``# buddelkiste-shim:`` marker so ``install`` can refresh or remove our
+    own files without clobbering unrelated binaries of the same name.
     """
 
 
@@ -811,6 +815,19 @@ def shims_check(*, quiet: bool) -> None:
         prefix = "warning" if issue.name == "*" else f"warning ({issue.name})"
         click.echo(f"{prefix}: {issue.message}", err=True)
     raise SystemExit(1)
+
+
+@shims_group.command("list")
+def shims_list() -> None:
+    """Print each shim and the host binary it would run."""
+    names = list_shim_names(load_config())
+    if not names:
+        click.echo("No shims.", err=True)
+        return
+    width = max(len(name) for name in names)
+    for entry in list_shims(names):
+        target = str(entry.target) if entry.target is not None else "-"
+        click.echo(f"{entry.name:<{width}}  {target}")
 
 
 def load_toml_file(path: Path) -> dict:
