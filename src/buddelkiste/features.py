@@ -895,6 +895,40 @@ def apply_feature_spec(
     )
 
 
+def lookup_project_config(
+    config: dict,
+    cwd: Path | None = None,
+) -> tuple[Path, dict] | None:
+    """Return ``(root, table)`` for the most specific project covering ``cwd``.
+
+    A project covers ``cwd`` when the paths are equal or ``cwd`` is inside the
+    project root. If several entries cover ``cwd``, the longest path wins; equal
+    length keeps the later list entry.
+    """
+    projects = config.get("projects")
+    if not isinstance(projects, list):
+        return None
+
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    best: tuple[int, Path, dict] | None = None
+    for entry in projects:
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        root = Path(str(entry["path"])).expanduser()
+        try:
+            root = root.resolve()
+        except OSError:
+            continue
+        if here != root and root not in here.parents:
+            continue
+        score = len(root.parts)
+        if best is None or score >= best[0]:
+            best = (score, root, entry)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def lookup_executable_config(config: dict, executable: str | None) -> dict | None:
     """Return the config table for an executable, if any.
 
@@ -928,6 +962,7 @@ def resolve_features(
     executable: str | None = None,
     enable: Sequence[str] = (),
     disable: Sequence[str] = (),
+    cwd: Path | None = None,
 ) -> dict[str, bool]:
     """Resolve which features are enabled.
 
@@ -936,7 +971,8 @@ def resolve_features(
     2. global config ``features`` (list allowlist or table overrides)
     3. per-executable config ``executables.<name>.features`` when an executable
        is provided
-    4. CLI ``--feature`` / ``--no-feature``
+    4. active ``[[projects]]`` ``features`` when ``cwd`` is covered
+    5. CLI ``--feature`` / ``--no-feature``
     """
     registry = load_feature_registry(config)
     enabled = {name: feature.default for name, feature in registry.items()}
@@ -954,6 +990,17 @@ def resolve_features(
             where=f"for executable {executable!r}",
             registry=registry,
         )
+
+    project = lookup_project_config(config, cwd=cwd)
+    if project is not None:
+        root, table = project
+        if "features" in table:
+            apply_feature_spec(
+                enabled,
+                table["features"],
+                where=f"for project {root}",
+                registry=registry,
+            )
 
     for name in enable:
         if name not in registry:

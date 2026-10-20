@@ -19,7 +19,10 @@ def prepared_cwd(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("buddelkiste.cli.get_binds", lambda config, enabled=None: [RWBindConfig(tmp_path)])
+    monkeypatch.setattr(
+        "buddelkiste.cli.get_binds",
+        lambda config, enabled=None, **kwargs: [RWBindConfig(tmp_path)],
+    )
     return tmp_path
 
 

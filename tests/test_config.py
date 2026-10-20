@@ -8,10 +8,10 @@ import pytest
 
 from buddelkiste.cli import (
     PROJECT_CONFIG_NAME,
-    ROBindConfig,
     RWBindConfig,
     add_bind_to_config,
-    ensure_cwd_in_sandbox,
+    add_project_to_config,
+    ensure_cwd_project,
     find_project_config,
     get_binds,
     get_env_args,
@@ -101,6 +101,16 @@ def test_merge_config_concatenates_lists_and_overrides_features() -> None:
         "mode": "none",
         "allow": ["1.1.1.1/32"],
     }
+
+
+def test_merge_config_concatenates_projects() -> None:
+    base = {"projects": [{"path": "/a", "features": {"python": True}}]}
+    overlay = {"projects": [{"path": "/b", "features": {"git": True}}]}
+    merged = merge_config(base, overlay)
+    assert merged["projects"] == [
+        {"path": "/a", "features": {"python": True}},
+        {"path": "/b", "features": {"git": True}},
+    ]
 
 
 def test_merge_config_merges_dbus_proxy_tables() -> None:
@@ -230,61 +240,86 @@ def test_get_env_args_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
-def test_ensure_cwd_covered_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_cwd_covered_by_project_is_noop(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.chdir(tmp_path)
-    binds: list = [ROBindConfig(tmp_path)]
-    ensure_cwd_in_sandbox(binds)
-    assert len(binds) == 1
+    config = {"projects": [{"path": str(tmp_path)}]}
+    result = ensure_cwd_project(config)
+    assert result == config
 
 
 def test_ensure_cwd_noninteractive_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
     with pytest.raises(click.ClickException, match="not available inside the sandbox"):
-        ensure_cwd_in_sandbox([])
+        ensure_cwd_project({})
 
 
-def test_ensure_cwd_once_adds_bind(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_ensure_cwd_yes_injects_project(
+    tmp_path: Path,
+    runtime_dir: Path,
+    tmp_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: True)
-    monkeypatch.setattr("click.prompt", lambda *a, **k: "once")
-    monkeypatch.setattr("click.confirm", lambda *a, **k: True)
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "yes")
+    monkeypatch.setattr(
+        "buddelkiste.prompts.prompt_project_features",
+        lambda config: {"python": True},
+    )
 
-    binds: list = []
-    ensure_cwd_in_sandbox(binds)
-    assert len(binds) == 1
-    assert isinstance(binds[0], RWBindConfig)
-    assert Path(binds[0].source) == tmp_path
+    result = ensure_cwd_project({})
+    root = str(tmp_path.resolve())
+    assert result["projects"] == [{"path": root, "features": {"python": True}}]
+    assert not tmp_config.exists() or tmp_config.read_text(encoding="utf-8") == ""
+
+    binds = get_binds(result, cwd=tmp_path)
+    assert any(
+        isinstance(bind, RWBindConfig) and Path(bind.source).resolve() == tmp_path.resolve()
+        for bind in binds
+    )
 
 
-def test_ensure_cwd_always_persists(
-    tmp_path: Path, tmp_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_ensure_cwd_always_persists_project(
+    tmp_path: Path,
+    runtime_dir: Path,
+    tmp_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: True)
-    monkeypatch.setattr("click.prompt", lambda *a, **k: "always")
-    monkeypatch.setattr("click.confirm", lambda *a, **k: False)
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "always")
+    monkeypatch.setattr(
+        "buddelkiste.prompts.prompt_project_features",
+        lambda config: {"rust": True},
+    )
 
-    binds: list = []
-    ensure_cwd_in_sandbox(binds)
-    assert isinstance(binds[0], ROBindConfig)
+    result = ensure_cwd_project({})
+    root = str(tmp_path.resolve())
+    assert result["projects"] == [{"path": root, "features": {"rust": True}}]
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
-    assert data["binds"][0]["source"] == str(tmp_path)
-    assert data["binds"][0]["mode"] == "ro"
+    assert "binds" not in data
+    assert data["projects"] == [{"path": root, "features": {"rust": True}}]
 
 
 def test_ensure_cwd_abort(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: True)
-    monkeypatch.setattr("click.prompt", lambda *a, **k: "no")
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "no")
     with pytest.raises(click.Abort):
-        ensure_cwd_in_sandbox([])
+        ensure_cwd_project({})
 
 
 def test_add_bind_to_config_escapes_special_chars(
@@ -295,6 +330,43 @@ def test_add_bind_to_config_escapes_special_chars(
     add_bind_to_config(source, mode="ro")
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
     assert data["binds"][0]["source"] == str(source)
+
+
+def test_get_binds_only_mounts_active_project(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = tmp_path / "active"
+    other = tmp_path / "other"
+    active.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(active)
+    config = {
+        "projects": [
+            {"path": str(active)},
+            {"path": str(other)},
+        ]
+    }
+    binds = get_binds(config, {name: False for name in FEATURE_NAMES}, cwd=active)
+    sources = [
+        Path(bind.source).resolve()
+        for bind in binds
+        if hasattr(bind, "source")
+    ]
+    assert active.resolve() in sources
+    assert other.resolve() not in sources
+
+
+def test_add_project_to_config_writes_table(tmp_config: Path, tmp_path: Path) -> None:
+    source = tmp_path / "proj"
+    source.mkdir()
+    add_project_to_config(source, features={"python": True, "rust": True})
+    data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
+    key = str(source.resolve())
+    assert data["projects"] == [
+        {"path": key, "features": {"python": True, "rust": True}}
+    ]
 
 
 def test_permanent_bind_roundtrip(

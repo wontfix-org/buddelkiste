@@ -273,7 +273,7 @@ def test_cli_run_reports_env_conflict(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "buddelkiste.cli.get_binds",
-        lambda config, enabled=None: [RWBindConfig(tmp_path)],
+        lambda config, enabled=None, **kwargs: [RWBindConfig(tmp_path)],
     )
     monkeypatch.setattr("buddelkiste.cli.run_bwrap", lambda *a, **k: 0)
 

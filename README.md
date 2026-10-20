@@ -24,7 +24,7 @@ bk docker-policy show
 bk docker-policy pending
 bk docker-policy approve   # or: deny [id|image]
 
-# PATH shims for configured [executables.*] (in ~/.local/bin)
+# PATH shims for configured [executables.*]
 bk shims install
 bk shims check
 
@@ -93,7 +93,7 @@ bk run --feature ssh --feature git git fetch
 
 Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
-`--feature` / `--no-feature`.
+active `[[projects]]` `features` → `--feature` / `--no-feature`.
 
 ### D-Bus proxy
 
@@ -165,6 +165,11 @@ mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays
 [executables.cursor-agent]
 features = ["user", "cursor", "git", "ssh", "gui", "dbus", "xdg-open"]
 args = ["--force"]
+
+[[projects]]
+path = "/home/me/src/myapp"
+features = { python = true, rust = true }
+network.mode = "filter"
 
 [executables.cursor-agent.network]
 mode = "filter"
@@ -242,16 +247,31 @@ Bind `mode` values:
 Paths in `source`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
 
 The current working directory must be visible inside the sandbox. If it is not
-covered by any bind, `bk` asks whether to whitelist it for this run or
-permanently (appends a `[[binds]]` entry). Non-interactively it errors instead.
+covered by any bind, `bk` asks **yes** (this run), **always** (persist a
+`[[projects]]` entry), or **no** (abort), then which features to enable. A
+project is always bound read-write. Non-interactively it errors instead.
+
+```toml
+[[projects]]
+path = "/home/me/src/myapp"
+features = { python = true, rust = true }
+network.mode = "filter"
+```
 
 ### PATH shims
 
 For each `[executables.<name>]` entry with shimming enabled, `bk shims install`
-writes a small `sh` wrapper into `$XDG_BIN_HOME` (default `~/.local/bin`). The
-shim resolves the real binary (skipping its own directory) and runs
-`bk run <real> "$@"`. Shims include a `# buddelkiste-shim:` marker so later
-installs can refresh our own files without overwriting unrelated binaries.
+writes a small `sh` wrapper into `$XDG_DATA_HOME/buddelkiste/shims` (default
+`~/.local/share/buddelkiste/shims`). The shim resolves the real binary
+(skipping its own directory) and runs `bk run <real> "$@"`. Shims include a
+`# buddelkiste-shim:` marker so later installs can refresh our own files
+without overwriting unrelated binaries.
+
+Install also writes `$XDG_DATA_HOME/buddelkiste/shims.sh` and, if they
+already exist, appends a marked include to `~/.bashrc` and `~/.zshrc`. Paths
+in those snippets use `$HOME` so the same rc file works for different users.
+Interactive shells source the snippet, prepend the shim directory to `PATH`,
+and run `bk shims check --quiet`.
 
 Toggle with a global `shims` boolean (default `true`) and optional per-entry
 `shim = true/false` overrides. Disabled entries remove a managed shim on the
@@ -268,12 +288,12 @@ shim = false
 ```
 
 ```bash
-bk shims install   # create/update/remove shims per config
+bk shims install   # create/update/remove shims and the shell hook
 bk shims check     # warn if an original binary appears earlier on PATH
+bk shims check -q  # warnings only (used by the startup snippet)
 ```
 
-Ensure `~/.local/bin` is early on your `PATH`. `bk shims check` exits non-zero
-when something would bypass the sandbox.
+`bk shims check` exits non-zero when something would bypass the sandbox.
 
 ### Python features (entry points)
 

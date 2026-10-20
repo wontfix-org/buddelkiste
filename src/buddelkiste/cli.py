@@ -44,8 +44,11 @@ a table applies true/false overrides. Per-executable config may also set
 network and args (extra arguments appended to the command).
 
 For each configured executable, `bk shims install` can place a PATH wrapper
-in $XDG_BIN_HOME (~/.local/bin) that runs the real binary via `bk run`.
-Use `bk shims check` to detect originals that shadow those shims on PATH.
+in $XDG_DATA_HOME/buddelkiste/shims that runs the real binary via `bk run`.
+Install also writes a POSIX snippet and sources it from existing ~/.bashrc
+and ~/.zshrc so interactive shells prepend that directory and run
+`bk shims check --quiet`. Use `bk shims check` to detect originals that
+shadow those shims on PATH.
 
 
 # Network
@@ -115,6 +118,13 @@ path to that file. When several keys share a file name, the first one wins.
 Each entry may contain a features list or table, a network table, an args list
 of extra arguments appended to the command, and/or a shim boolean (override
 the global shims toggle), applied when that executable is started.
+
+projects: List of tables (``[[projects]]``) with a mandatory path. The most
+specific path that covers the current working directory is active: that tree
+is always bound read-write, and an optional features list or table is applied
+after the executable's features. Nested keys such as network.mode stay on the
+same array element. Feature defaults → global features →
+executables.<name>.features → project features → --feature / --no-feature.
 
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
@@ -212,6 +222,12 @@ non-empty data_root needs prune first.
   shim = false
 
 \b
+  [[projects]]
+  path = "/home/me/src/myapp"
+  features = { python = true, rust = true }
+  network.mode = "filter"
+
+\b
   # shims = false  # disable PATH shims globally (per-entry shim=true still wins)
 
 \b
@@ -228,10 +244,9 @@ non-empty data_root needs prune first.
 # Working directory
 
 The current working directory must be visible inside the sandbox. If it is not
-covered by any bind, the script asks whether to whitelist it for this run only
-or permanently. Permanent whitelisting appends a [[binds]] entry to the
-configuration file. When running non-interactively the script exits with an
-error instead.
+covered by any bind, the script asks yes (this run), always (persist a
+[[projects]] entry), or no (abort), then which features to enable.
+Non-interactively it exits with an error instead.
 """
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
@@ -246,6 +261,7 @@ from buddelkiste.features import (
     feature_setup,
     format_features_help,
     lookup_executable_config,
+    lookup_project_config,
     resolve_features,
 )
 from buddelkiste.network import (
@@ -256,10 +272,11 @@ from buddelkiste.network import (
 )
 from buddelkiste.shims import (
     check_shims,
+    install_shim_hook,
     install_shims_from_config,
     shim_decisions_from_config,
+    shim_dir,
     shim_names_from_config,
-    xdg_bin_dir,
 )
 
 env = os.getenv
@@ -418,6 +435,12 @@ def run(
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     command = append_executable_args(command, config, executable)
+    config = ensure_cwd_project(
+        config,
+        executable=executable,
+        enable=enable_features,
+        disable=disable_features,
+    )
     enabled = resolve_features(
         config,
         executable=executable,
@@ -437,8 +460,6 @@ def run(
     )
     binds = get_binds(config, enabled)
     env_args = get_env_args(config, enabled)
-
-    ensure_cwd_in_sandbox(binds)
 
     bind_args = get_bind_args(binds)
 
@@ -724,8 +745,11 @@ def shims_group() -> None:
     """Install and verify PATH shims for configured executables.
 
     For each key under ``[executables.<name>]`` with shimming enabled, a small
-    ``sh`` wrapper is placed in ``$XDG_BIN_HOME`` (default ``~/.local/bin``)
-    that runs ``bk run <real-binary>`` with the caller's arguments. Control
+    ``sh`` wrapper is placed in ``$XDG_DATA_HOME/buddelkiste/shims`` (default
+    ``~/.local/share/buddelkiste/shims``) that runs ``bk run <real-binary>``
+    with the caller's arguments. ``install`` also writes a POSIX snippet and
+    sources it from existing ``~/.bashrc`` / ``~/.zshrc`` so interactive
+    shells prepend that directory and run ``bk shims check --quiet``. Control
     with top-level ``shims = true/false`` (default true) and per-entry
     ``shim = true/false``. Shims carry a ``# buddelkiste-shim:`` marker so
     ``install`` can refresh or remove our own files without clobbering
@@ -735,21 +759,22 @@ def shims_group() -> None:
 
 @shims_group.command("install")
 def shims_install() -> None:
-    """Create or update PATH shims for configured executables."""
+    """Create or update PATH shims and the interactive shell hook."""
     config = load_config()
     decisions = shim_decisions_from_config(config)
+    hook_results = install_shim_hook()
+    wrapper_results = (
+        install_shims_from_config(config, bin_dir=shim_dir()) if decisions else []
+    )
+    for result in (*hook_results, *wrapper_results):
+        click.echo(f"{result.action:9} {result.path}")
     if not decisions:
-        click.echo("No [executables] entries in config; nothing to install.", err=True)
+        click.echo("No [executables] entries in config; no wrappers to install.", err=True)
         return
-
-    bin_dir = xdg_bin_dir()
-    results = install_shims_from_config(config, bin_dir=bin_dir)
-    if not results:
+    if not wrapper_results:
         click.echo("All configured executables have shimming disabled; nothing to do.")
         return
-    for result in results:
-        click.echo(f"{result.action:9} {result.path}")
-    skipped = [r for r in results if r.action == "skipped"]
+    skipped = [r for r in wrapper_results if r.action == "skipped"]
     if skipped:
         click.echo(
             f"Left {len(skipped)} existing non-shim file(s) untouched "
@@ -759,22 +784,31 @@ def shims_install() -> None:
 
 
 @shims_group.command("check")
-def shims_check() -> None:
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Only print warnings; omit the success and empty-config lines.",
+)
+def shims_check(*, quiet: bool) -> None:
     """Warn if originals on PATH would bypass installed shims."""
     config = load_config()
     decisions = shim_decisions_from_config(config)
     if not decisions:
-        click.echo("No [executables] entries in config; nothing to check.", err=True)
+        if not quiet:
+            click.echo("No [executables] entries in config; nothing to check.", err=True)
         return
 
     names = shim_names_from_config(config)
     if not names:
-        click.echo("All configured executables have shimming disabled; nothing to check.")
+        if not quiet:
+            click.echo("All configured executables have shimming disabled; nothing to check.")
         return
 
-    issues = check_shims(names, bin_dir=xdg_bin_dir())
+    issues = check_shims(names, bin_dir=shim_dir())
     if not issues:
-        click.echo(f"OK: {len(names)} shim(s) intercept PATH correctly.")
+        if not quiet:
+            click.echo(f"OK: {len(names)} shim(s) intercept PATH correctly.")
         return
 
     for issue in issues:
@@ -845,13 +879,14 @@ def _merge_executables(base: dict, overlay: dict) -> dict:
 def merge_config(base: dict, overlay: dict) -> dict:
     """Merge project config over user config.
 
-    ``binds`` / ``envvars`` lists are concatenated. Nested ``feature``,
-    ``executables``, ``network``, and ``dbus_proxy`` tables are merged (project
-    wins on conflicts). Other keys are replaced by the overlay value.
+    ``binds`` / ``envvars`` / ``projects`` lists are concatenated. Nested
+    ``feature``, ``executables``, ``network``, and ``dbus_proxy`` tables are
+    merged (project wins on conflicts). Other keys are replaced by the overlay
+    value.
     """
     result = dict(base)
     for key, value in overlay.items():
-        if key in {"binds", "envvars"} and isinstance(value, list):
+        if key in {"binds", "envvars", "projects"} and isinstance(value, list):
             result[key] = [*result.get(key, []), *value]
         elif key == "feature" and isinstance(value, dict):
             merged = dict(result.get("feature") or {})
@@ -904,15 +939,24 @@ def load_config() -> dict:
     return config
 
 
-def get_binds(config: dict, enabled: dict[str, bool] | None = None) -> list:
+def get_binds(
+    config: dict,
+    enabled: dict[str, bool] | None = None,
+    *,
+    cwd: Path | None = None,
+) -> list:
     if enabled is None:
-        enabled = resolve_features(config)
+        enabled = resolve_features(config, cwd=cwd)
     binds = feature_binds(enabled, config)
     for index, bind_params in enumerate(config.get("binds", ())):
         bind = bind_from_spec(dict(bind_params), where=f"binds[{index}]")
         if not Path(bind.source).exists():
             raise FileNotFoundError(bind.source)
         binds.append(bind)
+    project = lookup_project_config(config, cwd=cwd)
+    if project is not None:
+        root, _table = project
+        binds.append(bind_config(root, mode="rw"))
     return binds
 
 
@@ -924,40 +968,83 @@ def is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 
-def ensure_cwd_in_sandbox(binds: list) -> None:
-    """Make sure the current directory is visible inside the sandbox.
+def cwd_is_covered(binds: list, cwd: Path | None = None) -> bool:
+    here = cwd if cwd is not None else Path.cwd()
+    return any(hasattr(bind, "covers_path") and bind.covers_path(here) for bind in binds)
 
-    If it is not covered by any bind, interactively offer to whitelist it, either for this
-    invocation only or permanently by adding it to the configuration file. The new bind is
-    appended to `binds`.
+
+def ensure_cwd_project(
+    config: dict,
+    *,
+    executable: str | None = None,
+    enable: Sequence[str] = (),
+    disable: Sequence[str] = (),
+    cwd: Path | None = None,
+) -> dict:
+    """Ensure the working directory is a project (or already covered).
+
+    If nothing covers cwd, interactively offer yes (this run), always (persist
+    a ``[[projects]]`` entry), or no (abort), then which features to enable.
     """
-    cwd = Path.cwd()
-    for bind in binds:
-        if hasattr(bind, "covers_path") and bind.covers_path(cwd):
-            return
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    enabled = resolve_features(
+        config, executable=executable, enable=enable, disable=disable, cwd=here
+    )
+    binds = get_binds(config, enabled, cwd=here)
+    if cwd_is_covered(binds, here):
+        return config
 
     if not is_interactive():
         raise click.ClickException(
-            f"The current directory {cwd} is not available inside the sandbox.\n"
+            f"The current directory {here} is not available inside the sandbox.\n"
         )
 
-    click.echo(f"The current directory {cwd} is not available inside the sandbox.", err=True)
-    choice = click.prompt(
-        "Whitelist it for this run only (once), permanently (always), or abort (no)?",
-        type=click.Choice(["once", "always", "no"]),
-        default="no",
+    from buddelkiste.prompts import prompt_cwd_access, prompt_project_features
+
+    click.echo(
+        f"The current directory {here} is not available inside the sandbox.",
         err=True,
     )
+    choice = prompt_cwd_access()
     if choice == "no":
         raise click.Abort()
 
-    mode = "rw" if click.confirm("Allow write access?", default=True, err=True) else "ro"
-
+    features = prompt_project_features(config)
+    table: dict = {"path": str(here)}
+    if features:
+        table["features"] = features
     if choice == "always":
-        add_bind_to_config(cwd, mode=mode)
-        click.echo(f"Added {cwd} to {CONFIG_PATH}.", err=True)
+        add_project_to_config(here, features=features)
+        click.echo(f"Added project {here} to {CONFIG_PATH}.", err=True)
+        return load_config()
+    return merge_config(config, {"projects": [table]})
 
-    binds.append(bind_config(cwd, mode=mode))
+
+def add_project_to_config(
+    source: Path,
+    *,
+    features: dict[str, bool] | None = None,
+) -> None:
+    """Append a ``[[projects]]`` entry for ``source`` to the user config."""
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    prefix = ""
+    if path.exists() and (content := path.read_bytes()):
+        prefix = "\n" if content.endswith(b"\n") else "\n\n"
+
+    lines = [
+        "[[projects]]",
+        f"path = {json.dumps(str(source.resolve()))}",
+    ]
+    if features:
+        inner = ", ".join(
+            f"{name} = {'true' if value else 'false'}" for name, value in features.items()
+        )
+        lines.append(f"features = {{ {inner} }}")
+
+    with path.open("a") as fobj:
+        fobj.write(prefix + "\n".join(lines) + "\n")
 
 
 def add_bind_to_config(source: Path, *, mode: str = "ro") -> None:
@@ -1076,10 +1163,12 @@ __all__ = [
     "TmpOverlayBindConfig",
     "Tmpfs",
     "add_bind_to_config",
+    "add_project_to_config",
     "append_executable_args",
     "bind_config",
     "cli",
-    "ensure_cwd_in_sandbox",
+    "cwd_is_covered",
+    "ensure_cwd_project",
     "find_project_config",
     "find_sandbox_ssh_key",
     "get_bind_args",

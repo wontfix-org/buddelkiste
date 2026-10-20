@@ -24,6 +24,7 @@ from buddelkiste.features import (
     interpolate_env,
     load_entry_point_features,
     load_feature_registry,
+    lookup_project_config,
     python_binds,
     resolve_features,
     rust_binds,
@@ -145,6 +146,72 @@ def test_resolve_features_per_executable_table_overrides_global() -> None:
     assert enabled["python"] is True
     assert enabled["docker"] is True
     assert enabled["ssh"] is False
+
+
+def test_resolve_features_project_table_adds_on_executable_list(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "executables": {"cursor-agent": {"features": ["cursor", "git"]}},
+        "projects": [
+            {"path": str(repo), "features": {"python": True, "rust": True}}
+        ],
+    }
+    enabled = resolve_features(config, executable="cursor-agent", cwd=repo)
+    assert enabled["cursor"] is True
+    assert enabled["git"] is True
+    assert enabled["python"] is True
+    assert enabled["rust"] is True
+
+
+def test_resolve_features_project_list_is_allowlist(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "executables": {"cursor-agent": {"features": ["cursor", "git"]}},
+        "projects": [{"path": str(repo), "features": ["python"]}],
+    }
+    enabled = resolve_features(config, executable="cursor-agent", cwd=repo)
+    assert enabled["python"] is True
+    assert enabled["cursor"] is False
+    assert enabled["git"] is False
+
+
+def test_lookup_project_most_specific_wins(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    config = {
+        "projects": [
+            {"path": str(parent), "features": {"git": True}},
+            {"path": str(child), "features": {"python": True}},
+        ]
+    }
+    found = lookup_project_config(config, cwd=child)
+    assert found is not None
+    root, table = found
+    assert root == child.resolve()
+    assert table["features"] == {"python": True}
+
+    enabled = resolve_features(config, cwd=child)
+    assert enabled["python"] is True
+    assert enabled["git"] is False
+
+
+def test_lookup_project_later_same_path_wins(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "projects": [
+            {"path": str(repo), "features": {"git": True}},
+            {"path": str(repo), "features": {"python": True}},
+        ]
+    }
+    found = lookup_project_config(config, cwd=repo)
+    assert found is not None
+    assert found[1]["features"] == {"python": True}
 
 
 def test_resolve_features_unknown_raises() -> None:

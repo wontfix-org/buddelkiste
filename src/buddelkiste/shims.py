@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,15 +15,57 @@ SHIM_VERSION = 1
 SHIM_MARKER_PREFIX = "# buddelkiste-shim:"
 SHIM_MARKER = f"{SHIM_MARKER_PREFIX}{SHIM_VERSION}"
 
+ENV_VERSION = 1
+ENV_MARKER_PREFIX = "# buddelkiste-shims-env:"
+ENV_MARKER = f"{ENV_MARKER_PREFIX}{ENV_VERSION}"
 
-def xdg_bin_dir(*, environ: dict[str, str] | None = None) -> Path:
-    """Return the user executable directory (``XDG_BIN_HOME`` or ``~/.local/bin``)."""
+HOOK_BEGIN = "# buddelkiste-shims-hook"
+HOOK_END = "# end buddelkiste-shims-hook"
+RC_FILENAMES = (".bashrc", ".zshrc")
+
+
+def user_home(*, environ: Mapping[str, str] | None = None) -> Path:
+    """Return the user home directory from ``HOME`` or :func:`Path.home`."""
     env = environ if environ is not None else os.environ
-    override = env.get("XDG_BIN_HOME")
+    return Path(env.get("HOME") or str(Path.home()))
+
+
+def xdg_data_home(*, environ: Mapping[str, str] | None = None) -> Path:
+    """Return the user data directory (``XDG_DATA_HOME`` or ``~/.local/share``)."""
+    env = environ if environ is not None else os.environ
+    override = env.get("XDG_DATA_HOME")
     if override:
         return Path(override).expanduser()
-    home = env.get("HOME") or str(Path.home())
-    return Path(home) / ".local" / "bin"
+    return user_home(environ=env) / ".local" / "share"
+
+
+def shim_dir(*, environ: Mapping[str, str] | None = None) -> Path:
+    """Directory that holds installed PATH shims."""
+    return xdg_data_home(environ=environ) / "buddelkiste" / "shims"
+
+
+def shim_env_path(*, environ: Mapping[str, str] | None = None) -> Path:
+    """Managed shell snippet sourced from interactive rc files."""
+    return xdg_data_home(environ=environ) / "buddelkiste" / "shims.sh"
+
+
+def home_relative_shell_path(path: Path, *, home: Path) -> str:
+    """Quote ``path`` for a shell, preferring ``$HOME`` when it lives under home.
+
+    The path is resolved so the include is stable, but the home prefix is left
+    as ``$HOME`` so the same rc snippet works for different users.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+        home_resolved = home.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser()
+        home_resolved = home.expanduser()
+    try:
+        rel = resolved.relative_to(home_resolved)
+    except ValueError:
+        return shlex.quote(str(resolved))
+    return '"$HOME/' + rel.as_posix().replace('"', '\\"') + '"'
 
 
 def global_shims_enabled(config: dict) -> bool:
@@ -107,6 +151,43 @@ exec "$bk" run "$real" "$@"
 """
 
 
+def render_shim_env(*, shim_directory: Path, home: Path) -> str:
+    """Return the POSIX snippet that prepends the shim dir and runs a quiet check."""
+    quoted = home_relative_shell_path(shim_directory, home=home)
+    return (
+        f"{ENV_MARKER}\n"
+        "# Managed by buddelkiste (`bk shims install`). Do not edit.\n"
+        f"_bk_shims={quoted}\n"
+        'case ":${PATH}:" in\n'
+        '  *":${_bk_shims}:"*) ;;\n'
+        '  *) PATH="${_bk_shims}${PATH:+:${PATH}}" ;;\n'
+        "esac\n"
+        "export PATH\n"
+        "unset _bk_shims\n"
+        "\n"
+        "case $- in\n"
+        "  *i*)\n"
+        "    if command -v bk >/dev/null 2>&1; then\n"
+        "      bk shims check --quiet || true\n"
+        "    fi\n"
+        "    ;;\n"
+        "esac\n"
+    )
+
+
+def render_rc_include(env_path: Path, *, home: Path) -> str:
+    """Return the marked rc block that sources the managed snippet."""
+    quoted = home_relative_shell_path(env_path, home=home)
+    return (
+        f"{HOOK_BEGIN}\n"
+        "# Managed by buddelkiste (`bk shims install`). Do not edit this block.\n"
+        f"if [ -r {quoted} ]; then\n"
+        f"  . {quoted}\n"
+        "fi\n"
+        f"{HOOK_END}\n"
+    )
+
+
 def is_our_shim(path: Path) -> bool:
     """True if ``path`` is a buddelkiste-managed shim (any marker version)."""
     try:
@@ -138,6 +219,32 @@ def _is_executable(path: Path) -> bool:
         return False
 
 
+def upsert_rc_hook(path: Path, block: str) -> str:
+    """Insert or replace the marked hook block in an existing rc file."""
+    text = path.read_text(encoding="utf-8")
+    if not block.endswith("\n"):
+        block += "\n"
+    start = text.find(HOOK_BEGIN)
+    if start != -1:
+        end = text.find(HOOK_END, start)
+        if end != -1:
+            end += len(HOOK_END)
+            if end < len(text) and text[end] == "\n":
+                end += 1
+            new_text = text[:start] + block + text[end:]
+        else:
+            new_text = text[:start] + block
+    else:
+        prefix = text
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        new_text = prefix + block
+    if new_text == text:
+        return "unchanged"
+    path.write_text(new_text, encoding="utf-8")
+    return "updated"
+
+
 @dataclass(frozen=True)
 class ShimInstallResult:
     name: str
@@ -151,13 +258,13 @@ def install_shims(
     bin_dir: Path | None = None,
     remove: list[str] | None = None,
 ) -> list[ShimInstallResult]:
-    """Create or refresh shims for ``names`` under the XDG bin directory.
+    """Create or refresh shims for ``names`` under the application shim directory.
 
     Existing non-shim files are left alone (``skipped``). Our own shims are
     rewritten when their contents differ from the current template. Names in
     ``remove`` delete a managed shim if present.
     """
-    target_dir = bin_dir if bin_dir is not None else xdg_bin_dir()
+    target_dir = bin_dir if bin_dir is not None else shim_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     body = render_shim()
     results: list[ShimInstallResult] = []
@@ -204,6 +311,38 @@ def install_shims_from_config(
     return install_shims(enabled, bin_dir=bin_dir, remove=disabled)
 
 
+def install_shim_hook(
+    *,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> list[ShimInstallResult]:
+    """Write the managed env snippet and include it from existing bash/zsh rc files."""
+    env = environ if environ is not None else os.environ
+    home_path = home if home is not None else user_home(environ=env)
+    results: list[ShimInstallResult] = []
+
+    env_path = shim_env_path(environ=env)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    body = render_shim_env(shim_directory=shim_dir(environ=env), home=home_path)
+    existed = env_path.exists()
+    previous = env_path.read_text(encoding="utf-8") if existed else None
+    if previous == body:
+        results.append(ShimInstallResult(env_path.name, env_path, "unchanged"))
+    else:
+        env_path.write_text(body, encoding="utf-8")
+        action = "updated" if existed else "created"
+        results.append(ShimInstallResult(env_path.name, env_path, action))
+
+    block = render_rc_include(env_path, home=home_path)
+    for name in RC_FILENAMES:
+        rc_path = home_path / name
+        if not rc_path.is_file():
+            continue
+        action = upsert_rc_hook(rc_path, block)
+        results.append(ShimInstallResult(name, rc_path, action))
+    return results
+
+
 @dataclass(frozen=True)
 class ShimCheckIssue:
     name: str
@@ -217,7 +356,7 @@ def check_shims(
     path_value: str | None = None,
 ) -> list[ShimCheckIssue]:
     """Return issues where a non-shim executable would win over our shim on PATH."""
-    target_dir = bin_dir if bin_dir is not None else xdg_bin_dir()
+    target_dir = bin_dir if bin_dir is not None else shim_dir()
     path_dirs = _path_entries(path_value)
     issues: list[ShimCheckIssue] = []
 
