@@ -27,6 +27,10 @@ typecheck *args:
 rc *args:
     "{{justfile_directory()}}/scripts/release" --rc {{args}}
 
-# Tag and build a release (omit version to be prompted with recent commits).
+# Tag and build a Python pre-release from any branch (not pushed).
+pre *args:
+    "{{justfile_directory()}}/scripts/release" --pre {{args}}
+
+# Tag and build a release (omit version to be prompted; return accepts the guess).
 release *args:
     "{{justfile_directory()}}/scripts/release" {{args}}

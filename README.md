@@ -566,3 +566,61 @@ Integration layout:
 - `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation; nested `nft`/netns cases are marked `e2e`
 - `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); marked `e2e`
 - `tests/integ_docker/` — docker-proxy / docker-instance e2e; marked `e2e`
+
+## Release
+
+`scripts/release` sets the project version in `pyproject.toml`, refreshes
+`uv.lock`, commits that bump on the current branch, and tags
+`v<version>`. It then builds an sdist and a universal wheel into
+`dist/<version>/`. Older version directories are left in place. `dist/latest`
+points at the version just built, and `dist/stable` points at the newest
+tagged final release. A release or release candidate is created only from
+`main` or `master`. After the build succeeds, a final release pushes that
+branch and the tag to the branch's upstream. A release candidate is not
+pushed. Unless `--dry-run` is set, the artifacts are published with
+`uv publish` (uv's configured index and credentials) after that push.
+
+```bash
+just release 0.2.0
+```
+
+`just release` calls `scripts/release`. When the version is omitted on a TTY,
+the script prints commit summaries since the last release and prompts for
+one. Hitting return accepts the guessed next release.
+
+```bash
+just release
+just release 0.2.0 --dry-run
+```
+
+`just rc` tags a release candidate of a future version. Pass the upcoming
+release and the next free `rcN` is chosen from the local tags, or pass the
+candidate itself:
+
+```bash
+just rc 0.3.0
+# pyproject.toml 0.3.0rc1
+just rc 0.3.0rc2 --dry-run
+just rc
+```
+
+A version with an `rcN` suffix is a pre-release, so pip and uv keep
+installing the current final release until someone asks for the candidate
+(`buddelkiste==0.3.0rc1`) or passes `--pre`. The candidate is committed on
+the release branch and tagged (`v0.3.0rc1`) before the build. `dist/latest`
+and `dist/rc` point at it; `dist/stable` stays on the last final release.
+Publish the local tag with `git push --follow-tags`.
+
+`just pre` builds a developmental pre-release from any branch. The version
+carries the short commit hash, a UTC timestamp, and the login name:
+
+```bash
+just pre
+# pyproject.toml 0.3.0.dev0+abcdef1.20261008120000.mvb
+just pre 0.3.0 --dry-run
+```
+
+It is committed on the current branch and tagged before the build, and it
+is not pushed. `dist/latest` points at it; `dist/stable` and `dist/rc` stay
+where they are. pip and uv treat it as a pre-release, so it is installed
+only for that exact version or with `--pre`.
