@@ -271,6 +271,7 @@ from buddelkiste.shims import (
     install_shims_from_config,
     shim_decisions_from_config,
     shim_dir,
+    shim_dir_on_path,
     shim_names_from_config,
 )
 
@@ -758,6 +759,11 @@ def shims_install() -> None:
     )
     for result in (*hook_results, *wrapper_results):
         click.echo(f"{result.action:9} {result.path}")
+    if not shim_dir_on_path():
+        click.echo(
+            "Open a new shell to activate the shims.",
+            err=True,
+        )
     if not decisions:
         click.echo("No [executables] entries in config; no wrappers to install.", err=True)
         return

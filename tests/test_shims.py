@@ -25,6 +25,7 @@ from buddelkiste.shims import (
     render_shim_env,
     shim_decisions_from_config,
     shim_dir,
+    shim_dir_on_path,
     shim_env_path,
     shim_names_from_config,
 )
@@ -157,6 +158,7 @@ def test_cli_shims_respect_global_off(
     result = CliRunner().invoke(cli, ["shims", "install"])
     assert result.exit_code == 0, result.output
     assert "disabled" in result.output
+    assert "Open a new shell to activate the shims." in result.output
     assert not (home / ".local" / "share" / "buddelkiste" / "shims" / "cursor-agent").exists()
     assert (home / ".local" / "share" / "buddelkiste" / "shims.sh").is_file()
 
@@ -326,6 +328,13 @@ def test_check_warns_when_original_first(tmp_path: Path) -> None:
     assert str(real) in issues[0].message
 
 
+def test_shim_dir_on_path(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    wrappers.mkdir()
+    assert shim_dir_on_path(bin_dir=wrappers, path_value=f"{wrappers}:/usr/bin")
+    assert not shim_dir_on_path(bin_dir=wrappers, path_value="/usr/bin")
+
+
 def test_check_warns_when_bin_not_on_path(tmp_path: Path) -> None:
     wrappers = tmp_path / "shims"
     install_shims(["tool"], bin_dir=wrappers)
@@ -362,6 +371,8 @@ def test_cli_shims_install_and_check(
     assert HOOK_BEGIN in bashrc
     assert "$HOME/.local/share/buddelkiste/shims.sh" in bashrc
 
+    assert "Open a new shell" not in result.output
+
     check = runner.invoke(cli, ["shims", "check"])
     assert check.exit_code == 0, check.output
     assert "OK:" in check.output
@@ -369,6 +380,27 @@ def test_cli_shims_install_and_check(
     quiet = runner.invoke(cli, ["shims", "check", "-q"])
     assert quiet.exit_code == 0, quiet.output
     assert quiet.output == ""
+
+
+def test_cli_shims_install_notes_new_shell_when_hook_not_loaded(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("# rc\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    tmp_config.write_text(
+        "[executables.cursor-agent]\nfeatures = [\"cursor\"]\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["shims", "install"])
+    assert result.exit_code == 0, result.output
+    assert "Open a new shell to activate the shims." in result.output
 
 
 def test_cli_shims_check_fails_on_shadow(

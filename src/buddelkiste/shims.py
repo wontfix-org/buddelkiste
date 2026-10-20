@@ -205,6 +205,19 @@ def _path_entries(path_value: str | None = None) -> list[Path]:
     return [Path(part) for part in raw.split(":") if part]
 
 
+def shim_dir_on_path(
+    *,
+    environ: Mapping[str, str] | None = None,
+    bin_dir: Path | None = None,
+    path_value: str | None = None,
+) -> bool:
+    """True if the shim directory is already a PATH entry (hook looks loaded)."""
+    env = environ if environ is not None else os.environ
+    target = bin_dir if bin_dir is not None else shim_dir(environ=env)
+    raw = path_value if path_value is not None else env.get("PATH", "")
+    return any(_same_path(entry, target) for entry in _path_entries(raw))
+
+
 def _same_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
@@ -360,7 +373,7 @@ def check_shims(
     path_dirs = _path_entries(path_value)
     issues: list[ShimCheckIssue] = []
 
-    bin_on_path = any(_same_path(entry, target_dir) for entry in path_dirs)
+    bin_on_path = shim_dir_on_path(bin_dir=target_dir, path_value=path_value)
     if names and not bin_on_path:
         issues.append(
             ShimCheckIssue(
