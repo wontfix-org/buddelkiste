@@ -102,7 +102,7 @@ or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
 set description, default, env (allowlisted variable names), binds (list of
-source/target/mode tables), and conflicts_with (other feature names that must
+source-or-glob/target/mode tables), and conflicts_with (other feature names that must
 not be enabled at the same time). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 Before starting, bk refuses launches with conflicting mounts, conflicting
@@ -133,15 +133,19 @@ network: Global network settings (mode, policy, allow, deny, allow_presets,
 deny_presets). Optional [network.presets] defines custom named lists used by
 either allow_presets or deny_presets. See example.
 
-binds: List of additional bind mounts for the sandbox with "source", "target"
-and "mode" keys. The "source" key is mandatory and gives the host directory
-to bind into the sandbox. The "target" key is optional and gives the mountpoint
-inside the sandbox; this defaults to the host-side path. The "mode" key defaults
-to "ro" (read-only). Other modes: "rw" (read-write bind), "tmp-overlay"
-(writable via ephemeral overlayfs; host source unchanged), "overlay"
-(writable via overlayfs with a persistent upper under
+binds: List of additional bind mounts for the sandbox. Each table has either
+"source" (one host path) or "glob" (a shell-style pattern matching files and
+directories), plus optional "target" and "mode". A "glob" entry binds every
+match with the same settings. "nullglob" (boolean, default false) allows a
+glob to match nothing; otherwise an empty match is an error. The "target"
+key is optional: with "source" it is the mountpoint (default: the host path);
+with "glob" it is a directory and each match is mounted at target/<basename>.
+The "mode" key defaults to "ro" (read-only). Other modes: "rw" (read-write
+bind), "tmp-overlay" (writable via ephemeral overlayfs; host source unchanged),
+"overlay" (writable via overlayfs with a persistent upper under
 $XDG_CACHE_HOME/buddelkiste/overlays/<hash-of-source>), or
 "overlay:<path>" (explicit persistent upper; <path> may use $VAR / ${VAR}).
+Bind paths and glob patterns may use $VAR or ${VAR}.
 
 envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
@@ -235,6 +239,17 @@ non-empty data_root needs prune first.
   mode = "ro"  # or "rw", "tmp-overlay", "overlay", "overlay:$XDG_CACHE_HOME/bk-upper"
 
 \b
+  [[binds]]
+  glob = "${HOME}/.config/git*"
+  mode = "ro"
+
+\b
+  [[binds]]
+  glob = "${HOME}/.ssh/id_*"
+  nullglob = true
+  mode = "ro"
+
+\b
   [[envvars]]
   name = "MYENVVAR"
   value = "example value"  # delete this line to use the value from the environment
@@ -253,7 +268,7 @@ from buddelkiste.conflicts import check_launch_conflicts
 from buddelkiste.docker_instance import STORAGE_DRIVERS
 from buddelkiste.features import (
     FEATURES,
-    bind_from_spec,
+    binds_from_spec,
     check_feature_requirements,
     feature_binds,
     feature_env_var_names,
@@ -1133,10 +1148,10 @@ def get_binds(
         enabled = resolve_features(config, cwd=cwd)
     binds = feature_binds(enabled, config)
     for index, bind_params in enumerate(config.get("binds", ())):
-        bind = bind_from_spec(dict(bind_params), where=f"binds[{index}]")
-        if not Path(bind.source).exists():
-            raise FileNotFoundError(bind.source)
-        binds.append(bind)
+        for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
+            if not Path(bind.source).exists():
+                raise FileNotFoundError(bind.source)
+            binds.append(bind)
     project = lookup_project_config(config, cwd=cwd)
     if project is not None:
         root, _table = project

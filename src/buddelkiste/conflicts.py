@@ -18,7 +18,7 @@ from buddelkiste.binds import (
 )
 from buddelkiste.features import (
     BASE_ENV_VARS,
-    bind_from_spec,
+    binds_from_spec,
     enabled_feature_names,
     load_feature_registry,
 )
@@ -223,8 +223,8 @@ def iter_bind_claims(
         for bind in registry[name].binds():
             yield from claims_from_bind(bind, f"feature {name!r}")
     for index, bind_params in enumerate(config.get("binds", ())):
-        bind = bind_from_spec(dict(bind_params), where=f"binds[{index}]")
-        yield from claims_from_bind(bind, f"config binds[{index}]")
+        for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
+            yield from claims_from_bind(bind, f"config binds[{index}]")
 
 
 def iter_env_claims(

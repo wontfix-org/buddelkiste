@@ -8,6 +8,7 @@ Bind paths may interpolate ``$VAR`` / ``${VAR}`` from the process environment.
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import re
@@ -716,27 +717,88 @@ def _normalize_bind_mode(mode: str, *, where: str) -> str:
     )
 
 
-def bind_from_spec(spec: dict, *, where: str = "bind"):
-    """Build a bind config from a TOML/config table (``source`` / ``target`` / ``mode``)."""
-    if "source" not in spec:
-        raise click.ClickException(f"{where} missing required key 'source'")
+_BIND_SPEC_KEYS = frozenset({"source", "target", "mode", "glob", "nullglob"})
+
+
+def _bind_from_parts(
+    source: str,
+    target: str | None,
+    mode: str,
+    *,
+    where: str,
+):
+    try:
+        return bind_config(source, target, mode=mode)
+    except ValueError as exc:
+        raise click.ClickException(f"{where}: {exc}") from exc
+
+
+def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
+    """Build bind configs from a TOML/config table.
+
+    A table has either ``source`` (one host path) or ``glob`` (a shell-style
+    pattern). Every match is bound with the same ``mode``. ``target`` is
+    optional: with ``source`` it is the mountpoint (default: the host path);
+    with ``glob`` it is a directory and each match is mounted at
+    ``target/<basename>``. ``nullglob`` (with ``glob`` only) allows zero
+    matches; otherwise an empty match is an error.
+    """
     if "read_only" in spec:
         raise click.ClickException(
             f"{where} uses 'read_only'; use mode = \"ro\"|\"rw\"|"
             "\"tmp-overlay\"|\"overlay\"|\"overlay:<path>\" instead"
         )
-    unknown = set(spec) - {"source", "target", "mode"}
+    unknown = set(spec) - _BIND_SPEC_KEYS
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise click.ClickException(f"{where} has unknown keys: {keys}")
 
-    source = expand_bind_path(str(spec["source"]))
+    has_source = "source" in spec
+    has_glob = "glob" in spec
+    if has_source and has_glob:
+        raise click.ClickException(f"{where} has both 'source' and 'glob'; use only one")
+    if not has_source and not has_glob:
+        raise click.ClickException(f"{where} missing required key 'source' or 'glob'")
+
+    if "nullglob" in spec:
+        if not has_glob:
+            raise click.ClickException(f"{where} has 'nullglob' without 'glob'")
+        if not isinstance(spec["nullglob"], bool):
+            raise click.ClickException(f"{where}: 'nullglob' must be a boolean")
+
     target = expand_bind_path(str(spec["target"])) if "target" in spec else None
     mode = _normalize_bind_mode(str(spec.get("mode", "ro")), where=where)
-    try:
-        return bind_config(source, target, mode=mode)
-    except ValueError as exc:
-        raise click.ClickException(f"{where}: {exc}") from exc
+
+    if has_source:
+        source = expand_bind_path(str(spec["source"]))
+        return [_bind_from_parts(source, target, mode, where=where)]
+
+    pattern = expand_bind_path(str(spec["glob"]))
+    matches = sorted(glob.glob(pattern, recursive=True))
+    if not matches:
+        if spec.get("nullglob", False):
+            return []
+        raise click.ClickException(f"{where}: glob {spec['glob']!r} matched nothing")
+
+    binds = []
+    for match in matches:
+        match_target = None if target is None else str(Path(target) / Path(match).name)
+        binds.append(_bind_from_parts(match, match_target, mode, where=where))
+    return binds
+
+
+def bind_from_spec(spec: dict, *, where: str = "bind"):
+    """Build a single bind config from a ``source`` table.
+
+    Glob tables that expand to zero or several binds must use
+    :func:`binds_from_spec`.
+    """
+    binds = binds_from_spec(spec, where=where)
+    if len(binds) != 1:
+        raise click.ClickException(
+            f"{where} must resolve to exactly one bind (got {len(binds)})"
+        )
+    return binds[0]
 
 
 def _toml_binds_factory(
@@ -745,10 +807,12 @@ def _toml_binds_factory(
     feature_name: str,
 ) -> Callable[[], list]:
     def binds() -> list:
-        return [
-            bind_from_spec(spec, where=f"feature.{feature_name}.binds[{index}]")
-            for index, spec in enumerate(bind_specs)
-        ]
+        result = []
+        for index, spec in enumerate(bind_specs):
+            result.extend(
+                binds_from_spec(spec, where=f"feature.{feature_name}.binds[{index}]")
+            )
+        return result
 
     return binds
 
@@ -780,7 +844,7 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
     for index, item in enumerate(binds_spec):
         if not isinstance(item, dict):
             raise click.ClickException(
-                f"feature.{name}.binds[{index}] must be a table with 'source'"
+                f"feature.{name}.binds[{index}] must be a table with 'source' or 'glob'"
             )
 
     conflicts_spec = data.get("conflicts_with", [])

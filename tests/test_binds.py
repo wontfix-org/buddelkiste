@@ -329,6 +329,95 @@ def test_base_binds_include_dev_proc_tmpfs_and_omit_shadow(
     assert "/etc/shadow" not in flat
 
 
+def test_get_binds_expands_glob_with_shared_mode(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    files = [tmp_path / "a.txt", tmp_path / "b.txt"]
+    nested = tmp_path / "dir"
+    nested.mkdir()
+    for path in files:
+        path.write_text("x", encoding="utf-8")
+
+    binds = get_binds(
+        {"binds": [{"glob": str(tmp_path / "*"), "mode": "ro"}]},
+        {n: False for n in FEATURE_NAMES},
+    )
+    expected = {str(path) for path in (*files, nested)}
+    sources = {bind.source for bind in binds if isinstance(bind, ROBindConfig)}
+    assert expected <= sources
+    matched = [
+        bind
+        for bind in binds
+        if isinstance(bind, ROBindConfig) and bind.source in expected
+    ]
+    assert matched
+    assert all(next(iter(bind)) == "--ro-bind" for bind in matched)
+
+
+def test_get_binds_glob_target_uses_basename(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.write_text("1", encoding="utf-8")
+    two.write_text("2", encoding="utf-8")
+
+    binds = get_binds(
+        {
+            "binds": [
+                {
+                    "glob": str(tmp_path / "*"),
+                    "target": "/mnt/extra",
+                    "mode": "ro",
+                }
+            ]
+        },
+        {n: False for n in FEATURE_NAMES},
+    )
+    by_source = {bind.source: bind for bind in binds if isinstance(bind, ROBindConfig)}
+    assert list(by_source[str(one)]) == ["--ro-bind", str(one), "/mnt/extra/one"]
+    assert list(by_source[str(two)]) == ["--ro-bind", str(two), "/mnt/extra/two"]
+
+
+def test_get_binds_glob_nullglob_allows_empty(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    binds = get_binds(
+        {
+            "binds": [
+                {"glob": str(tmp_path / "missing" / "*"), "nullglob": True},
+                {"source": str(extra), "mode": "ro"},
+            ]
+        },
+        {n: False for n in FEATURE_NAMES},
+    )
+    sources = [bind.source for bind in binds if isinstance(bind, ROBindConfig)]
+    assert str(extra) in sources
+    assert not any("missing" in source for source in sources)
+
+
+def test_get_binds_glob_empty_match_raises(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import click
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    with pytest.raises(click.ClickException, match="matched nothing"):
+        get_binds(
+            {"binds": [{"glob": str(tmp_path / "nope" / "*")}]},
+            {n: False for n in FEATURE_NAMES},
+        )
+
+
 def test_feature_binds_omit_ssh_when_disabled(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

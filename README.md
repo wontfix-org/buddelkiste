@@ -217,6 +217,15 @@ source = "${HOME}/scratch"
 target = "/mnt/scratch"
 mode = "tmp-overlay"   # writable in the sandbox; host tree unchanged
 
+[[binds]]
+glob = "${HOME}/.config/git*"
+mode = "ro"
+
+[[binds]]
+glob = "${HOME}/.ssh/id_*"
+nullglob = true
+mode = "ro"
+
 [[envvars]]
 name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
@@ -245,7 +254,11 @@ Bind `mode` values:
 | `overlay` | overlayfs; upper under `$XDG_CACHE_HOME/buddelkiste/overlays/<sha256(source)>` |
 | `overlay:<path>` | overlayfs with an explicit upper path (`$VAR` / `${VAR}` / `~` ok) |
 
-Paths in `source`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
+Paths in `source`, `glob`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
+A `glob` table binds every matching file or directory with the same `mode`.
+`nullglob = true` allows the pattern to match nothing; the default is to error.
+With `glob`, an optional `target` is a directory and each match is mounted at
+`target/<basename>`.
 
 The current working directory must be visible inside the sandbox. If it is not
 covered by any bind, `bk` asks **yes** (this run), **always** (persist a

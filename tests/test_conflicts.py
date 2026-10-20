@@ -15,6 +15,7 @@ from buddelkiste.conflicts import (
     env_claims_from_bwrap_args,
     find_env_conflicts,
     find_mount_conflicts,
+    iter_bind_claims,
     iter_env_claims,
 )
 from buddelkiste.features import (
@@ -303,3 +304,24 @@ def test_cli_run_reports_env_conflict(
     assert result.exit_code != 0
     assert "SSH_AUTH_SOCK" in result.output
     assert "refusing to start" in result.output
+
+
+def test_iter_bind_claims_expands_glob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.write_text("1", encoding="utf-8")
+    two.write_text("2", encoding="utf-8")
+    enabled = {name: False for name in FEATURE_NAMES}
+    claims = list(
+        iter_bind_claims(
+            {"binds": [{"glob": str(tmp_path / "*"), "mode": "ro"}]},
+            enabled,
+        )
+    )
+    sources = {claim.source for claim in claims}
+    assert str(one) in sources
+    assert str(two) in sources

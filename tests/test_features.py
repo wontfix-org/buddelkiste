@@ -12,6 +12,7 @@ from buddelkiste.features import (
     FEATURES,
     Feature,
     base_binds,
+    binds_from_spec,
     check_feature_requirements,
     clear_feature_caches,
     cursor_binds,
@@ -304,6 +305,84 @@ def test_toml_feature_rejects_builtin_name() -> None:
 def test_toml_feature_rejects_unknown_keys() -> None:
     with pytest.raises(click.ClickException, match="unknown keys"):
         load_feature_registry({"feature": {"mine": {"script": "nope"}}})
+
+
+def test_binds_from_spec_glob_matches_files_and_dirs(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.txt"
+    file_b = tmp_path / "b.txt"
+    nested = tmp_path / "dir"
+    file_a.write_text("a", encoding="utf-8")
+    file_b.write_text("b", encoding="utf-8")
+    nested.mkdir()
+
+    binds = binds_from_spec({"glob": str(tmp_path / "*"), "mode": "rw"}, where="binds[0]")
+    sources = {bind.source for bind in binds}
+    assert sources == {str(file_a), str(file_b), str(nested)}
+    assert all(bind.source == bind.target for bind in binds)
+
+
+def test_binds_from_spec_glob_expands_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BIND_ROOT", str(tmp_path))
+    path = tmp_path / "keep"
+    path.write_text("x", encoding="utf-8")
+    binds = binds_from_spec({"glob": "$BIND_ROOT/k*"}, where="binds[0]")
+    assert [bind.source for bind in binds] == [str(path)]
+
+
+def test_binds_from_spec_nullglob_empty(tmp_path: Path) -> None:
+    assert (
+        binds_from_spec(
+            {"glob": str(tmp_path / "missing*"), "nullglob": True},
+            where="binds[0]",
+        )
+        == []
+    )
+
+
+def test_binds_from_spec_empty_glob_errors(tmp_path: Path) -> None:
+    with pytest.raises(click.ClickException, match="matched nothing"):
+        binds_from_spec({"glob": str(tmp_path / "missing*")}, where="binds[0]")
+
+
+def test_binds_from_spec_rejects_source_and_glob(tmp_path: Path) -> None:
+    path = tmp_path / "x"
+    path.write_text("x", encoding="utf-8")
+    with pytest.raises(click.ClickException, match="both 'source' and 'glob'"):
+        binds_from_spec({"source": str(path), "glob": str(tmp_path / "*")})
+
+
+def test_binds_from_spec_rejects_nullglob_without_glob() -> None:
+    with pytest.raises(click.ClickException, match="nullglob"):
+        binds_from_spec({"source": "/tmp", "nullglob": True})
+
+
+def test_binds_from_spec_rejects_non_bool_nullglob(tmp_path: Path) -> None:
+    with pytest.raises(click.ClickException, match="must be a boolean"):
+        binds_from_spec({"glob": str(tmp_path / "*"), "nullglob": "true"})
+
+
+def test_binds_from_spec_requires_source_or_glob() -> None:
+    with pytest.raises(click.ClickException, match="source' or 'glob"):
+        binds_from_spec({"mode": "ro"})
+
+
+def test_toml_feature_glob_binds(tmp_path: Path) -> None:
+    one = tmp_path / "one.cfg"
+    two = tmp_path / "two.cfg"
+    one.write_text("1", encoding="utf-8")
+    two.write_text("2", encoding="utf-8")
+    config = {
+        "feature": {
+            "cfgs": {
+                "binds": [{"glob": str(tmp_path / "*.cfg"), "mode": "ro"}],
+            }
+        }
+    }
+    registry = load_feature_registry(config)
+    sources = {bind.source for bind in registry["cfgs"].binds()}
+    assert sources == {str(one), str(two)}
 
 
 def test_toml_bind_rejects_read_only_key() -> None:
