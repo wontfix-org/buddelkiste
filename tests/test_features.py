@@ -27,6 +27,7 @@ from buddelkiste.features import (
     lookup_project_config,
     python_binds,
     resolve_features,
+    resolved_project_root,
     rust_binds,
     user_binds,
     xdg_open_binds,
@@ -212,6 +213,8 @@ def test_lookup_project_later_same_path_wins(tmp_path: Path) -> None:
     found = lookup_project_config(config, cwd=repo)
     assert found is not None
     assert found[1]["features"] == {"python": True}
+    assert resolved_project_root({}, cwd=repo) == repo.resolve()
+    assert resolved_project_root(config, cwd=repo) == repo.resolve()
 
 
 def test_resolve_features_unknown_raises() -> None:

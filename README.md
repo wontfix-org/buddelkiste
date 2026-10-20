@@ -135,10 +135,7 @@ bk run --feature dbus-proxy \
 
 ### Config
 
-Configuration is read from `~/.config/buddelkiste/config.toml`, then merged with
-`.buddelkiste.toml` from the current directory or an ancestor (project values
-win). The project file is masked inside the sandbox (empty file bound over the
-path) so the sandboxed command cannot read it.
+Configuration is read from `~/.config/buddelkiste/config.toml`.
 
 ```toml
 # Global allowlist (exactly these features), or use a table of overrides:
@@ -391,10 +388,10 @@ features = { docker = false, docker-proxy = true }
 Effective policy is the merge of, in order:
 
 1. **Host store** — `~/.config/buddelkiste/docker-proxy/<project-key>.toml`
-   (per project directory / `.buddelkiste.toml` root)
+   (per active ``[[projects]]`` path, or cwd)
 2. **Session grants** — same dir, `<project-key>.session.toml` (written by
    `bk docker-policy approve`)
-3. **Config declaration** — optional `[docker_proxy]` in user/project config
+3. **Config declaration** — optional `[docker_proxy]` in user config
    (used by `apply`; also merged when present)
 
 ```bash

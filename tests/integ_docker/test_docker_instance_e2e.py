@@ -52,10 +52,6 @@ def _prepare_env(
     run.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    (project / ".buddelkiste.toml").write_text(
-        "features = { docker = false, docker-instance = true }\n",
-        encoding="utf-8",
-    )
     monkeypatch.setenv("HOME", str(home))
     # Docker CLI 29 picks secretservice when the config has no auths. That
     # helper aborts if the secret service is down, so pulls never start.

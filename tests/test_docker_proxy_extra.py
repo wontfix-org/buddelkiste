@@ -46,14 +46,16 @@ def test_image_match_empty_pattern_and_prefix() -> None:
     assert _image_matches("library/redis", "library/redis:*")
 
 
-def test_project_policy_key_uses_buddelkiste_toml(
+def test_project_policy_key_uses_projects_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     nested = tmp_path / "proj" / "sub"
     nested.mkdir(parents=True)
-    (tmp_path / "proj" / ".buddelkiste.toml").write_text("features = []\n", encoding="utf-8")
-    key = project_policy_key(nested)
+    proj = tmp_path / "proj"
+    key = project_policy_key(
+        nested, config={"projects": [{"path": str(proj)}]}
+    )
     assert key.startswith("proj-")
 
 

@@ -929,6 +929,13 @@ def lookup_project_config(
     return best[1], best[2]
 
 
+def resolved_project_root(config: dict, cwd: Path | None = None) -> Path:
+    """Active ``[[projects]]`` path covering ``cwd``, otherwise ``cwd``."""
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    found = lookup_project_config(config, cwd=here)
+    return found[0] if found else here
+
+
 def lookup_executable_config(config: dict, executable: str | None) -> dict | None:
     """Return the config table for an executable, if any.
 

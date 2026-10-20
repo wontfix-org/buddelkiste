@@ -349,14 +349,13 @@ def check_launch_conflicts(
     config: Mapping,
     binds: Sequence[object] = (),
     setup_parts: Sequence[tuple[str, Sequence[str]]] = (),
-    hide_args: Sequence[str] = (),
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Raise ``ClickException`` if features, mounts, or env assignments conflict.
 
     Mount and env claims are derived from ``config`` / ``enabled`` with feature
     provenance. ``binds`` may include extras (e.g. cwd whitelist) not present in
-    config. Setup fragments and project-config hide args are merged when given.
+    config. Setup fragments are merged when given.
     """
     errors = check_feature_mutex(enabled, config)
 
@@ -371,10 +370,6 @@ def check_launch_conflicts(
 
     for name, part in setup_parts:
         mount_claims.extend(claims_from_bwrap_args(part, f"feature {name!r} setup"))
-    if hide_args:
-        mount_claims.extend(
-            claims_from_bwrap_args(hide_args, "project-config mask")
-        )
     errors.extend(find_mount_conflicts(mount_claims))
 
     env_claims = list(iter_env_claims(config, enabled, environ=environ))

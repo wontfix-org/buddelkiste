@@ -28,7 +28,6 @@ from buddelkiste.docker_proxy import (
     DEFAULT_DENY_HOST_CONFIG,
     DockerProxyPolicy,
     DockerProxyServer,
-    _find_project_config,
     _short_listen_socket,
     host_policy_path,
     policy_from_mapping,
@@ -295,11 +294,15 @@ def prune_instance_stores(paths: Sequence[Path]) -> list[Path]:
     return removed
 
 
-def project_root(start: Path | None = None) -> Path:
-    """Directory that owns ``.buddelkiste.toml``, else cwd."""
-    cur = (start or Path.cwd()).resolve()
-    cfg = _find_project_config(cur)
-    return cfg.parent if cfg is not None else cur
+def project_root(start: Path | None = None, *, config: dict | None = None) -> Path:
+    """Active ``[[projects]]`` path covering ``start``, else cwd."""
+    from buddelkiste.features import resolved_project_root
+
+    if config is None:
+        from buddelkiste.cli import load_config
+
+        config = load_config()
+    return resolved_project_root(config, cwd=start)
 
 
 def instance_policy_from_mapping(

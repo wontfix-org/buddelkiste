@@ -110,22 +110,18 @@ def policy_dir() -> Path:
     return Path.home() / ".config" / "buddelkiste" / "docker-proxy"
 
 
-def _find_project_config(start: Path | None = None) -> Path | None:
-    cur = (start or Path.cwd()).resolve()
-    for directory in (cur, *cur.parents):
-        candidate = directory / ".buddelkiste.toml"
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def project_policy_key(start: Path | None = None) -> str:
+def project_policy_key(start: Path | None = None, *, config: dict | None = None) -> str:
     """Stable key for the current project (dirname + path hash)."""
     import hashlib
 
+    from buddelkiste.features import resolved_project_root
+
     cur = (start or Path.cwd()).resolve()
-    project = _find_project_config(cur)
-    base = project.parent if project is not None else cur
+    if config is None:
+        from buddelkiste.cli import load_config
+
+        config = load_config()
+    base = resolved_project_root(config, cwd=cur)
     digest = hashlib.sha256(str(base).encode()).hexdigest()[:12]
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", base.name).strip("-") or "project"
     return f"{safe_name}-{digest}"
