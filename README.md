@@ -554,16 +554,15 @@ and systemd-resolved chooses the uplinks. Other nameserver IPs from
 ```bash
 uv sync --group dev
 uv run bk --help
-uv run pytest                 # unit + nested-safe integ + coverage; TUN e2e skipped without /dev/net/tun; docker e2e skipped inside bwrap
-uv run pytest -m integration  # real bwrap host/none + nested nft
-uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
-uv run pytest -m requires_docker  # docker-proxy e2e (host Docker; skipped inside bwrap)
-uv run pytest -m requires_rootless_docker  # docker-instance e2e (skipped inside bwrap)
+uv run pytest                 # unit + integ + host e2e + coverage
+uv run pytest -m integration  # nested-safe real bwrap (host/none)
+uv run pytest -m e2e          # host e2e: filter/tun, nested ns, docker
+uv run pytest -m "not e2e"    # exclude host e2e (use inside a bwrap sandbox)
 ```
 
 Integration layout:
 
 - `tests/` — unit/contract tests (mocked subprocess where needed)
-- `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft` + DNS proxy/`nft add element`/`UDP/53` redirect against real tools
-- `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); skipped without `/dev/net/tun`
-- `tests/integ_docker/` — docker-proxy / docker-instance e2e; skipped inside bwrap sandboxes
+- `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation; nested `nft`/netns cases are marked `e2e`
+- `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); marked `e2e`
+- `tests/integ_docker/` — docker-proxy / docker-instance e2e; marked `e2e`

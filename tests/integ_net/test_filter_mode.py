@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.requires_tun
+pytestmark = pytest.mark.e2e
 
 
 def test_filter_mode_runs_command(run_bk) -> None:

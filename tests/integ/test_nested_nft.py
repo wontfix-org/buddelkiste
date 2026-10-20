@@ -9,10 +9,9 @@ import pytest
 from buddelkiste.network import NetworkConfig, build_nft_ruleset
 from tests.probes import env_with_host_tools
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.e2e]
 
 
-@pytest.mark.requires_nested_net
 def test_apply_nft_ruleset_in_nested_netns() -> None:
     rules = build_nft_ruleset(
         NetworkConfig(
@@ -55,7 +54,6 @@ def test_apply_nft_ruleset_in_nested_netns() -> None:
     assert proc.returncode == 0, proc.stderr
 
 
-@pytest.mark.requires_nested_user
 def test_setpriv_can_drop_net_admin_in_nested_userns() -> None:
     script = textwrap.dedent(
         """

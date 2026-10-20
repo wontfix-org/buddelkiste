@@ -30,7 +30,7 @@ def _dns_query(name: str, qtype: int = 1) -> bytes:
     return header + _encode_name(name) + struct.pack("!HH", qtype, 1)
 
 
-@pytest.mark.requires_nested_net
+@pytest.mark.e2e
 def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
     """Install rules + dyn allow through buddelkiste APIs (not raw nft CLI)."""
     script = textwrap.dedent(
@@ -77,7 +77,7 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
-@pytest.mark.requires_nested_net
+@pytest.mark.e2e
 def test_udp53_redirect_hits_dns_proxy() -> None:
     """DnsProxy on UDP/53 must intercept queries in a nested netns (no nft NAT)."""
     script = textwrap.dedent(

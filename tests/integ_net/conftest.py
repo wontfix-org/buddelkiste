@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from buddelkiste.network import NET_HELPER_ENV
-from tests.probes import can_nested_net, has_tun
 
 
 @pytest.fixture(params=["pasta", "slirp4netns"])
@@ -36,14 +35,3 @@ def run_bk(integ_workspace: dict[str, Path], filter_backend: str):
         )
 
     return _run
-
-
-def pytest_runtest_setup(item: pytest.Item) -> None:
-    if item.get_closest_marker("requires_tun"):
-        missing = []
-        if not has_tun():
-            missing.append("/dev/net/tun")
-        if not can_nested_net():
-            missing.append("unshare --user --net")
-        if missing:
-            pytest.skip("filter e2e unavailable (missing: " + ", ".join(missing) + ")")

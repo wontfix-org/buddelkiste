@@ -59,12 +59,8 @@ addopts = [
     "--cov-report=term",
 ]
 markers = [
-    "integration: nested-safe integration tests (real bwrap / nested nft)",
-    "requires_nested_net: needs unshare --user --map-root-user --net",
-    "requires_nested_user: needs unshare --user --map-root-user",
-    "requires_tun: needs /dev/net/tun and nested netns",
-    "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
-    "requires_rootless_docker: needs rootlesskit + subuid/subgid for docker-instance",
+    "integration: nested-safe integration tests (real bwrap host/none)",
+    "e2e: host-only tests (TUN, nested user/net ns, Docker); exclude in bwrap",
 ]
 
 [tool.coverage.run]

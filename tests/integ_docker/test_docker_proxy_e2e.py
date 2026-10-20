@@ -1,4 +1,4 @@
-"""Host-only docker-proxy e2e (skipped inside bwrap)."""
+"""Host-only docker-proxy e2e."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from buddelkiste.docker_proxy import (
     write_policy_file,
 )
 
-pytestmark = pytest.mark.requires_docker
+pytestmark = pytest.mark.e2e
 
 ALPINE = "alpine:3.20"
 

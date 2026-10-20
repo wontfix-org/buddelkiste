@@ -1,4 +1,4 @@
-"""Host-only docker-instance e2e (skipped inside bwrap)."""
+"""Host-only docker-instance e2e."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from buddelkiste.docker_instance import (
 )
 from buddelkiste.docker_proxy import DEFAULT_DENY_HOST_CONFIG, DockerProxyPolicy
 
-pytestmark = pytest.mark.requires_rootless_docker
+pytestmark = pytest.mark.e2e
 
 ALPINE = "alpine:3.20"
 

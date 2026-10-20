@@ -7,6 +7,22 @@ Prefer ``just test`` (with optional pytest args after ``--``) over invoking
 
    just test tests/test_docker_proxy.py -q --cov=buddelkiste.docker_proxy
 
+## Host e2e tests
+
+Tests marked ``e2e`` need a real host: ``/dev/net/tun``, nested user/net
+namespaces, and/or the Docker engine. Do not run them inside a
+bubblewrap/agent sandbox.
+
+Detect a sandbox with ``tests.probes.in_bwrap_sandbox`` (PID 1 is
+``bwrap``). When that is true, exclude e2e (``just`` splits ``-m``
+expressions, so set ``PYTEST_ADDOPTS``)::
+
+   PYTEST_ADDOPTS='-m "not e2e"' just test
+
+A sandboxed run is not the full suite. Before creating a commit, ask the
+user to run the complete suite on the host (no ``-m "not e2e"``) and wait
+for that result.
+
 ## Lint and typecheck before commit
 
 Before creating a commit, run both and fix any findings::
@@ -54,7 +70,7 @@ Example shape::
 ## Continuous host test feedback (`scripts/debug-loop`)
 
 When iterating on failures that must run **outside** the agent sandbox (e.g.
-`requires_docker`, real Docker socket, or other host-only probes), use the
+``e2e`` tests, real Docker socket, or other host-only probes), use the
 debug-loop watcher instead of asking the user to paste logs each time.
 
 ### Setup

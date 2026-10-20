@@ -99,24 +99,11 @@ def run_bk(integ_workspace: dict[str, Path]):
 def pytest_configure(config: pytest.Config) -> None:
     _configure_agent_pytest_defaults(config)
     config.addinivalue_line(
-        "markers", "integration: nested-safe integration tests (real bwrap / nested nft)"
-    )
-    config.addinivalue_line(
-        "markers", "requires_nested_net: needs unshare --user --map-root-user --net"
-    )
-    config.addinivalue_line(
-        "markers", "requires_nested_user: needs unshare --user --map-root-user"
-    )
-    config.addinivalue_line(
-        "markers", "requires_tun: needs /dev/net/tun and nested netns"
+        "markers", "integration: nested-safe integration tests (real bwrap host/none)"
     )
     config.addinivalue_line(
         "markers",
-        "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
-    )
-    config.addinivalue_line(
-        "markers",
-        "requires_rootless_docker: needs rootlesskit + subuid/subgid for docker-instance",
+        "e2e: host-only tests (TUN, nested user/net ns, Docker); exclude in bwrap",
     )
 
 
@@ -142,13 +129,3 @@ def _configure_agent_pytest_defaults(config: pytest.Config) -> None:
         cov_report["term-missing"] = cov_report.pop("term")
     else:
         cov_report["term-missing"] = None
-
-
-def pytest_runtest_setup(item: pytest.Item) -> None:
-    if item.get_closest_marker("requires_docker") or item.get_closest_marker(
-        "requires_rootless_docker"
-    ):
-        from tests.probes import in_bwrap_sandbox
-
-        if in_bwrap_sandbox():
-            pytest.skip("docker e2e requires a host (not bwrap) environment")

@@ -3,36 +3,10 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from functools import cache
 from pathlib import Path
 
 from buddelkiste.which import path_with_tools
-
-
-@cache
-def has_tun() -> bool:
-    return Path("/dev/net/tun").exists()
-
-
-@cache
-def can_nested_user() -> bool:
-    proc = subprocess.run(
-        ["unshare", "--user", "--map-root-user", "true"],
-        check=False,
-        capture_output=True,
-    )
-    return proc.returncode == 0
-
-
-@cache
-def can_nested_net() -> bool:
-    proc = subprocess.run(
-        ["unshare", "--user", "--map-root-user", "--net", "true"],
-        check=False,
-        capture_output=True,
-    )
-    return proc.returncode == 0
 
 
 def env_with_host_tools() -> dict[str, str]:

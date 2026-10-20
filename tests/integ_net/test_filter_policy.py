@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.requires_tun
+pytestmark = pytest.mark.e2e
 
 
 def test_filter_wildcard_hostname_allow_via_dns_proxy(run_bk) -> None:
