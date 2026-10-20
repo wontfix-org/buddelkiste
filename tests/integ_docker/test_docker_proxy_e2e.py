@@ -43,7 +43,7 @@ def _ensure_image(image: str) -> None:
         text=True,
     )
     if pull.returncode != 0:
-        pytest.skip(f"cannot pull {image}: {pull.stderr}")
+        pytest.fail(f"cannot pull {image}: {pull.stderr}")
 
 
 def test_proxy_allows_listed_image_via_docker_cli(
