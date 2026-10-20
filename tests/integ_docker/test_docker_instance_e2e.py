@@ -1,4 +1,4 @@
-"""Host-only docker-instance e2e (skipped without rootlesskit / subuid)."""
+"""Host-only docker-instance e2e (skipped inside bwrap)."""
 
 from __future__ import annotations
 
@@ -33,17 +33,6 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.connect(self.unix_path)
-
-
-def _buildx_available() -> bool:
-    proc = subprocess.run(
-        ["docker", "buildx", "version"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return proc.returncode == 0
 
 
 def _docker_host_from_args(args: list[str] | tuple[str, ...]) -> str:
@@ -291,11 +280,9 @@ def test_instance_proxy_allows_buildkit_session(
         assert "API category 'session' is denied" not in body
 
 
-def test_instance_buildkit_cli_build_when_buildx_available(
+def test_instance_buildkit_cli_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if not _buildx_available():
-        pytest.skip("docker buildx not installed on host")
     _home, run, project = _prepare_env(tmp_path, monkeypatch)
     dockerfile = textwrap.dedent(
         f"""\

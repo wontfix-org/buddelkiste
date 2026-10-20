@@ -108,10 +108,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers", "requires_nested_user: needs unshare --user --map-root-user"
     )
     config.addinivalue_line(
-        "markers", "requires_tun: needs /dev/net/tun and filter-mode helpers"
-    )
-    config.addinivalue_line(
-        "markers", "requires_outbound: needs outbound TCP to 1.1.1.1:443"
+        "markers", "requires_tun: needs /dev/net/tun and nested netns"
     )
     config.addinivalue_line(
         "markers",
@@ -148,17 +145,10 @@ def _configure_agent_pytest_defaults(config: pytest.Config) -> None:
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    if item.get_closest_marker("requires_docker"):
-        from tests.probes import has_docker, in_bwrap_sandbox
+    if item.get_closest_marker("requires_docker") or item.get_closest_marker(
+        "requires_rootless_docker"
+    ):
+        from tests.probes import in_bwrap_sandbox
 
         if in_bwrap_sandbox():
             pytest.skip("docker e2e requires a host (not bwrap) environment")
-        if not has_docker():
-            pytest.skip("docker daemon / CLI not available")
-    if item.get_closest_marker("requires_rootless_docker"):
-        from tests.probes import has_rootless_docker, in_bwrap_sandbox
-
-        if in_bwrap_sandbox():
-            pytest.skip("rootless docker-instance e2e requires a host environment")
-        if not has_rootless_docker():
-            pytest.skip("rootlesskit / subuid not available for docker-instance")

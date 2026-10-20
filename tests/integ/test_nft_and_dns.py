@@ -10,7 +10,7 @@ import textwrap
 
 import pytest
 
-from tests.probes import can_nested_nft, env_with_host_tools, has_outbound_network
+from tests.probes import env_with_host_tools
 
 pytestmark = pytest.mark.integration
 
@@ -33,9 +33,6 @@ def _dns_query(name: str, qtype: int = 1) -> bytes:
 @pytest.mark.requires_nested_net
 def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
     """Install rules + dyn allow through buddelkiste APIs (not raw nft CLI)."""
-    if not can_nested_nft():
-        pytest.skip("nft in nested netns not available")
-
     script = textwrap.dedent(
         """
         from buddelkiste.dns_proxy import nft_add_allow_ip
@@ -83,9 +80,6 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
 @pytest.mark.requires_nested_net
 def test_udp53_redirect_hits_dns_proxy() -> None:
     """DnsProxy on UDP/53 must intercept queries in a nested netns (no nft NAT)."""
-    if not can_nested_nft():
-        pytest.skip("nft in nested netns not available")
-
     script = textwrap.dedent(
         """
         import socket
@@ -218,12 +212,8 @@ def _free_udp_port() -> int:
     return port
 
 
-@pytest.mark.requires_outbound
 def test_dns_proxy_forwards_to_real_upstream() -> None:
     """DnsProxy + DNS-over-TCP against a public resolver (no TUN needed)."""
-    if not has_outbound_network():
-        pytest.skip("no outbound network")
-
     from buddelkiste.dns_proxy import DnsProxy
 
     allowed: list[tuple[str, int]] = []
@@ -254,12 +244,8 @@ def test_dns_proxy_forwards_to_real_upstream() -> None:
         proxy.stop()
 
 
-@pytest.mark.requires_outbound
 def test_dns_proxy_wildcard_allow_via_live_upstream() -> None:
     """``*.domain`` allow must seed IPs for subdomains, not the apex name."""
-    if not has_outbound_network():
-        pytest.skip("no outbound network")
-
     from buddelkiste.dns_proxy import DnsProxy
 
     allowed: list[str] = []

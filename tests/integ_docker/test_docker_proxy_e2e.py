@@ -1,4 +1,4 @@
-"""Host-only docker-proxy e2e (skipped inside bwrap / without Docker)."""
+"""Host-only docker-proxy e2e (skipped inside bwrap)."""
 
 from __future__ import annotations
 

@@ -7,7 +7,6 @@ import pytest
 pytestmark = pytest.mark.requires_tun
 
 
-@pytest.mark.requires_outbound
 def test_filter_wildcard_hostname_allow_via_dns_proxy(run_bk) -> None:
     """Wildcard allows are not preseeded; live DNS proxy must unlock matching hosts."""
     proc = run_bk(
@@ -30,7 +29,6 @@ def test_filter_wildcard_hostname_allow_via_dns_proxy(run_bk) -> None:
     assert "OK" in proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_deny_host_returns_nxdomain(run_bk) -> None:
     proc = run_bk(
         "--net-allow",
@@ -52,7 +50,6 @@ def test_filter_deny_host_returns_nxdomain(run_bk) -> None:
     assert "FAIL:" in proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_deny_ip_blocks_even_with_wide_allow(run_bk) -> None:
     # Allow Cloudflare DNS IP range-ish via host allow of a different name,
     # but explicitly deny 8.8.8.8 — direct connect must fail.

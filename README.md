@@ -554,11 +554,11 @@ and systemd-resolved chooses the uplinks. Other nameserver IPs from
 ```bash
 uv sync --group dev
 uv run bk --help
-uv run pytest                 # unit + nested-safe integ + coverage; TUN/docker e2e skipped if unavailable
+uv run pytest                 # unit + nested-safe integ + coverage; TUN e2e skipped without /dev/net/tun; docker e2e skipped inside bwrap
 uv run pytest -m integration  # real bwrap host/none + nested nft
 uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
 uv run pytest -m requires_docker  # docker-proxy e2e (host Docker; skipped inside bwrap)
-uv run pytest -m requires_rootless_docker  # docker-instance e2e (needs rootlesskit)
+uv run pytest -m requires_rootless_docker  # docker-instance e2e (skipped inside bwrap)
 ```
 
 Integration layout:
@@ -566,4 +566,4 @@ Integration layout:
 - `tests/` — unit/contract tests (mocked subprocess where needed)
 - `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft` + DNS proxy/`nft add element`/`UDP/53` redirect against real tools
 - `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); skipped without `/dev/net/tun`
-- `tests/integ_docker/` — docker-proxy / docker-instance e2e; skipped inside bwrap or without Docker / rootlesskit
+- `tests/integ_docker/` — docker-proxy / docker-instance e2e; skipped inside bwrap sandboxes

@@ -7,16 +7,13 @@ import textwrap
 import pytest
 
 from buddelkiste.network import NetworkConfig, build_nft_ruleset
-from tests.probes import can_nested_nft, env_with_host_tools
+from tests.probes import env_with_host_tools
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.mark.requires_nested_net
 def test_apply_nft_ruleset_in_nested_netns() -> None:
-    if not can_nested_nft():
-        pytest.skip("nft in nested netns not available")
-
     rules = build_nft_ruleset(
         NetworkConfig(
             mode="filter",

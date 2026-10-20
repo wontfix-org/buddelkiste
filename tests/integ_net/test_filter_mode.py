@@ -15,7 +15,6 @@ def test_filter_mode_implies_from_deny_preset(run_bk) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_allows_listed_ip(run_bk) -> None:
     proc = run_bk(
         "--net-allow",
@@ -32,7 +31,6 @@ def test_filter_allows_listed_ip(run_bk) -> None:
     assert "OK" in proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_denies_unlisted_ip(run_bk) -> None:
     """Deny policy rejects a public address that is not on the allow list.
 
@@ -55,7 +53,6 @@ def test_filter_denies_unlisted_ip(run_bk) -> None:
     assert "OK" not in proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_default_policy_resolves_public_names(run_bk) -> None:
     """Default allow must still resolve public names.
 
@@ -76,7 +73,6 @@ def test_filter_default_policy_resolves_public_names(run_bk) -> None:
     assert proc.stdout.strip()
 
 
-@pytest.mark.requires_outbound
 def test_filter_default_policy_connects_public_https(run_bk) -> None:
     """Default filter must open TCP/443 to a public name.
 
@@ -102,7 +98,6 @@ def test_filter_default_policy_connects_public_https(run_bk) -> None:
     assert "OK" in proc.stdout
 
 
-@pytest.mark.requires_outbound
 def test_filter_hostname_allow_via_dns_proxy(run_bk) -> None:
     # Prefer IPv4: pasta filter netns often has no IPv6 route, so connecting to
     # the first getaddrinfo result (commonly AAAA) fails with ENETUNREACH.
