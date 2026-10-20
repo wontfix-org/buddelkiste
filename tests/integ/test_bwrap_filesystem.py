@@ -103,11 +103,8 @@ def test_etc_passwd_readable_shadow_absent(run_bk) -> None:
 
 def test_tmp_is_private_tmpfs(run_bk, tmp_path: Path) -> None:
     host_marker = Path("/tmp") / f"buddelkiste-integ-{tmp_path.name}"
-    try:
-        if host_marker.exists():
-            host_marker.unlink()
-    except OSError:
-        pytest.skip("cannot manage host /tmp marker")
+    if host_marker.exists():
+        host_marker.unlink()
 
     proc = run_bk(
         "--network",
