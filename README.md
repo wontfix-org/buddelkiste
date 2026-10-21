@@ -21,11 +21,6 @@ bk list-net-presets
 bk info                 # merged config for cwd
 bk info cursor-agent    # plus that executable's overlays
 
-# Host-side docker-proxy policy (outside the sandbox)
-bk docker-policy show
-bk docker-policy pending
-bk docker-policy approve   # or: deny [id|image]
-
 # PATH shims for configured [executables.*]
 bk shims install
 bk shims check
