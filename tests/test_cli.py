@@ -49,8 +49,23 @@ def test_cli_runs_bwrap_with_command(
 ) -> None:
     result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh", "/bin/echo", "hello"])
     assert result.exit_code == 42, result.output
-    assert fake_bwrap["args"][:1] == ["bwrap"]
-    assert fake_bwrap["args"][-3:] == ["--", "/bin/echo", "hello"]
+    args = fake_bwrap["args"]
+    assert args[:1] == ["bwrap"]
+    assert args[args.index("--uid") + 1] == str(os.getuid())
+    assert args[args.index("--gid") + 1] == str(os.getgid())
+    assert args[args.index("--cap-drop") + 1] == "ALL"
+    name = pwd.getpwuid(os.getuid()).pw_name
+    dash = args.index("--")
+    assert dash > args.index("--clearenv")
+    assert args[dash - 6 : dash] == [
+        "--setenv",
+        "USER",
+        name,
+        "--setenv",
+        "LOGNAME",
+        name,
+    ]
+    assert args[-3:] == ["--", "/bin/echo", "hello"]
     assert fake_bwrap["nets"][0].mode == "filter"
     assert "10.0.0.0/8" in fake_bwrap["nets"][0].deny
     assert "127.0.0.0/8" in fake_bwrap["nets"][0].deny

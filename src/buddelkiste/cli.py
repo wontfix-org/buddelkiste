@@ -506,9 +506,18 @@ def run(
             binds=binds,
             setup_parts=setup_parts,
         )
+        # --unshare-all defaults to uid 0. Filter mode is root only while
+        # nftables is installed; bwrap then keeps every capability unless
+        # told to drop them, because its outer uid is 0. The command itself
+        # uses the invoking uid, gid, and login name, with no capabilities.
+        # Login env is after --clearenv so USER and LOGNAME survive it.
+        creds, login_env = _sandbox_identity_args()
         bwrap_args = [
             "bwrap",
             "--unshare-all",
+            *creds,
+            "--cap-drop",
+            "ALL",
             "--clearenv",
             "--die-with-parent",
             "--chdir",
@@ -516,6 +525,7 @@ def run(
             *bind_args,
             *env_args,
             *setup_args,
+            *login_env,
             "--",
             *command,
         ]
@@ -1265,6 +1275,21 @@ def add_bind_to_config(source: Path, *, mode: str = "ro") -> None:
 
     with path.open("a") as fobj:
         fobj.write(prefix + "\n".join(entry) + "\n")
+
+
+def _sandbox_identity_args() -> tuple[list[str], list[str]]:
+    """Return ``(--uid/--gid, --setenv USER/LOGNAME)`` for the invoking user.
+
+    The setenv list must be placed after ``--clearenv``.
+    """
+    uid = os.getuid()
+    gid = os.getgid()
+    creds = ["--uid", str(uid), "--gid", str(gid)]
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return creds, []
+    return creds, ["--setenv", "USER", name, "--setenv", "LOGNAME", name]
 
 
 def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequence[str]:
