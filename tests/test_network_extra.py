@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -207,12 +208,16 @@ def test_find_net_helper_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
         find_net_helper()
 
 
-def test_apply_nft_ruleset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_nft_ruleset(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setattr(
         "buddelkiste.network.subprocess.run",
         lambda *a, **k: MagicMock(returncode=0, stderr="", stdout=""),
     )
-    apply_nft_ruleset("flush ruleset\n")
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        apply_nft_ruleset("flush ruleset\n")
+    assert "Running nft:" in caplog.text
 
     monkeypatch.setattr(
         "buddelkiste.network.subprocess.run",
@@ -222,7 +227,9 @@ def test_apply_nft_ruleset(monkeypatch: pytest.MonkeyPatch) -> None:
         apply_nft_ruleset("bad")
 
 
-def test_spawn_bwrap_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawn_bwrap_dropped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     captured: dict = {}
 
     def fake_popen(cmd):
@@ -230,7 +237,9 @@ def test_spawn_bwrap_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
         return MagicMock()
 
     monkeypatch.setattr("buddelkiste.network.subprocess.Popen", fake_popen)
-    spawn_bwrap_dropped(["bwrap", "--unshare-all", "--", "true"])
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        spawn_bwrap_dropped(["bwrap", "--unshare-all", "--", "true"])
+    assert "Running setpriv:" in caplog.text
     assert captured["cmd"][0] == "setpriv"
     assert "--bounding-set=-net_admin" in captured["cmd"]
     assert "--share-net" in captured["cmd"]
@@ -257,7 +266,9 @@ def test_preseed_host_allows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert added == ["1.2.3.4", "2001:db8::1"]
 
 
-def test_start_slirp4netns_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_slirp4netns_paths(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     seen: dict = {}
 
     def popen_ready(args, **_kwargs):
@@ -270,8 +281,10 @@ def test_start_slirp4netns_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         return proc
 
     monkeypatch.setattr("buddelkiste.network.subprocess.Popen", popen_ready)
-    assert start_slirp4netns("/bin/slirp") is seen["proc"]
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        assert start_slirp4netns("/bin/slirp") is seen["proc"]
     assert "--ready-fd" in seen["args"]
+    assert "Running slirp4netns:" in caplog.text
 
     dead = MagicMock()
     dead.poll.return_value = 1
@@ -505,7 +518,9 @@ def test_wait_for_tap_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         _wait_for_tap()
 
 
-def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_bwrap_filter_slirp_branch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
 
     def which(name: str):
@@ -541,11 +556,13 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("buddelkiste.network.subprocess.Popen", fake_popen)
     monkeypatch.setattr("buddelkiste.network.start_slirp4netns", fake_slirp)
     monkeypatch.setattr("buddelkiste.network.os.readlink", fake_readlink)
-    code = run_bwrap(
-        ["bwrap", "--unshare-all", "--", "true"],
-        NetworkConfig(mode="filter"),
-    )
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        code = run_bwrap(
+            ["bwrap", "--unshare-all", "--", "true"],
+            NetworkConfig(mode="filter"),
+        )
     assert code == 3
+    assert "Running unshare:" in caplog.text
     assert captured["args"][0] == "unshare"
     assert "--start-slirp" in captured["args"]
     assert captured["slirp"] == (

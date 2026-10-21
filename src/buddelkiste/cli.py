@@ -298,6 +298,7 @@ from buddelkiste.shims import (
     shim_dir_on_path,
     shim_names_from_config,
 )
+from buddelkiste.which import log_cmdline
 
 env = os.getenv
 
@@ -448,7 +449,10 @@ def run(
     dbus_broadcast: tuple[str, ...],
     args: list[str],
 ) -> None:
-    logging.basicConfig(level="DEBUG" if debug else "WARNING")
+    logging.basicConfig(
+        level="DEBUG" if debug else "WARNING",
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     config = load_config()
     command = resolve_launch_command(args)
@@ -532,7 +536,7 @@ def run(
         ]
 
         if debug:
-            log_cmdline(bwrap_args)
+            log_cmdline(bwrap_args, label="bwrap")
             log.debug(
                 "network mode=%s policy=%s allow=%s deny=%s allow_hosts=%s deny_hosts=%s",
                 net.mode,
@@ -1354,17 +1358,6 @@ def append_executable_args(
             f"executables args for {executable!r} must be a list of strings"
         )
     return [*command, *extra]
-
-
-def log_cmdline(cmdline):
-    log.debug("Running:")
-    group = [cmdline[0]]
-    for arg in cmdline[1:]:
-        if arg.startswith("-"):
-            log.debug("  %s", " ".join(group))
-            group.clear()
-        group.append(arg)
-    log.debug("  %s", " ".join(group))
 
 
 # Re-export bind helpers for tests and callers that imported them from cli.

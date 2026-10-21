@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 import click
 
-from buddelkiste.which import which
+from buddelkiste.which import log_cmdline, which
 
 log = logging.getLogger(__name__)
 
@@ -881,17 +881,19 @@ def _notify_pending_image_approval(pending_id: str, image: str) -> None:
         f"Approval required for image {image}\n"
         f"bk docker-policy approve {pending_id}"
     )
+    argv = [
+        notify,
+        "--app-name=buddelkiste",
+        "--urgency=normal",
+        "--icon=dialog-question",
+        "--expire-time=0",
+        title,
+        body,
+    ]
+    log_cmdline(argv, label="notify-send")
     try:
         subprocess.Popen(
-            [
-                notify,
-                "--app-name=buddelkiste",
-                "--urgency=normal",
-                "--icon=dialog-question",
-                "--expire-time=0",
-                title,
-                body,
-            ],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

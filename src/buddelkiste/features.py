@@ -33,7 +33,7 @@ from buddelkiste.binds import (
     Tmpfs,
     bind_config,
 )
-from buddelkiste.which import which
+from buddelkiste.which import log_cmdline, which
 
 env = os.getenv
 log = logging.getLogger(__name__)
@@ -243,7 +243,7 @@ def dbus_proxy_setup() -> Generator[Sequence[str]]:
         str(proxy_socket),
         *dbus_proxy_command_args(policy),
     ]
-    log.debug("xdg-dbus-proxy %s", command)
+    log_cmdline(command, label="xdg-dbus-proxy")
     proc = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -345,8 +345,10 @@ class SshAgent:
         agent_dir = Path(tempfile.mkdtemp(prefix="bwrapssh", dir=env("XDG_RUNTIME_DIR")))
         socket = agent_dir / "sock"
 
+        agent_cmd = ["ssh-agent", "-D", "-a", str(socket)]
+        log_cmdline(agent_cmd, label="ssh-agent")
         proc = subprocess.Popen(
-            ["ssh-agent", "-D", "-a", str(socket)],
+            agent_cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
         )
@@ -372,8 +374,10 @@ class SshAgent:
     def add_key(self, path: Path) -> None:
         if self.socket is None:
             raise click.ClickException("ssh-agent is not running")
+        add_cmd = ["ssh-add", "-q", str(path)]
+        log_cmdline(add_cmd, label="ssh-add")
         subprocess.run(
-            ["ssh-add", "-q", str(path)],
+            add_cmd,
             env={**os.environ, "SSH_AUTH_SOCK": str(self.socket)},
             check=True,
         )

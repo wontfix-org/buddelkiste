@@ -34,7 +34,7 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
-from buddelkiste.which import path_with_tools, which
+from buddelkiste.which import log_cmdline, path_with_tools, which
 
 log = logging.getLogger(__name__)
 
@@ -845,7 +845,7 @@ def docker_instance_setup(
     if "bwrap" in cmd:
         bwrap_bin = _bwrap_off_apparmor_path(short_base)
         cmd = [str(bwrap_bin) if part == "bwrap" else part for part in cmd]
-    log.info("docker-instance starting: %s", " ".join(cmd))
+    log_cmdline(cmd, label="rootlesskit")
     log_path = (runtime_dir or short_base) / "dockerd.log"
     log_file = log_path.open("wb")
     env = os.environ.copy()

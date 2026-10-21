@@ -24,9 +24,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from io import BufferedIOBase
 from pathlib import Path
 
 import click
@@ -47,9 +49,78 @@ from buddelkiste.published_ports import (
     PublishedPortRelay,
     sandbox_docker_host,
 )
-from buddelkiste.which import path_with_tools, which
+from buddelkiste.which import log_cmdline, path_with_tools, which
 
 log = logging.getLogger(__name__)
+
+
+def relay_debug_stream(stream: BufferedIOBase, label: str) -> threading.Thread:
+    """Log each line from ``stream`` as ``label: line`` until EOF."""
+    logger = logging.getLogger("buddelkiste")
+
+    def _read() -> None:
+        try:
+            for raw in iter(stream.readline, b""):
+                if not isinstance(raw, bytes):
+                    break
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line:
+                    logger.debug("%s: %s", label, line)
+        except Exception:
+            logger.debug("%s: log relay stopped", label, exc_info=True)
+
+    thread = threading.Thread(target=_read, name=f"bk-{label}-log", daemon=True)
+    thread.start()
+    return thread
+
+
+def relay_debug_file(path: Path, label: str, stop: threading.Event) -> threading.Thread:
+    """Tail ``path`` and log each line as ``label: line`` until ``stop`` is set."""
+    logger = logging.getLogger("buddelkiste")
+
+    def _emit(raw: bytes) -> None:
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        if line:
+            logger.debug("%s: %s", label, line)
+
+    def _read() -> None:
+        while not path.exists():
+            if stop.wait(0.02):
+                return
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    raw = handle.readline()
+                    if raw:
+                        _emit(raw)
+                        continue
+                    if stop.is_set():
+                        rest = handle.read()
+                        if rest:
+                            for part in rest.splitlines():
+                                _emit(part)
+                        return
+                    stop.wait(0.02)
+        except OSError as exc:
+            logger.debug("%s: log relay stopped: %s", label, exc)
+
+    thread = threading.Thread(target=_read, name=f"bk-{label}-log", daemon=True)
+    thread.start()
+    return thread
+
+
+def _pasta_debug_launch(tmp_path: Path) -> tuple[list[str], str, bool]:
+    """Return extra pasta args, the shell snippet, and whether stderr is piped.
+
+    Piping is only safe when stderr is a tty. The spawned command restores
+    ``/dev/tty``, so pasta's messages stay off the sandbox command's stderr.
+    Otherwise pasta writes a log file the parent tails.
+    """
+    if not os.environ.get("BUDDELKISTE_DEBUG"):
+        return [], 'exec "$@"', False
+    if sys.stderr.isatty():
+        return ["--debug"], 'exec 2>/dev/tty; exec "$@"', True
+    return ["--debug", "--log-file", str(tmp_path / "pasta.log")], 'exec "$@"', False
 
 NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
@@ -751,8 +822,10 @@ def _replace_ro_bind_target(args: list[str], target: str, source: str) -> list[s
 
 
 def apply_nft_ruleset(ruleset: str) -> None:
+    cmd = ["nft", "-f", "-"]
+    log_cmdline(cmd, label="nft")
     proc = subprocess.run(
-        ["nft", "-f", "-"],
+        cmd,
         input=ruleset,
         text=True,
         check=False,
@@ -823,6 +896,7 @@ def start_slirp4netns(
     if userns_path:
         argv.extend(["--userns-path", userns_path])
     argv.extend(["--ready-fd", str(write_fd), str(pid), "tap0"])
+    log_cmdline(argv, label="slirp4netns")
     try:
         proc = subprocess.Popen(
             argv,
@@ -846,6 +920,8 @@ def start_slirp4netns(
             readable, _, _ = select.select([read_fd], [], [], min(0.05, remaining))
             if readable:
                 os.read(read_fd, 16)
+                if isinstance(proc.stderr, BufferedIOBase):
+                    relay_debug_stream(proc.stderr, "slirp4netns")
                 return proc
         proc.terminate()
         try:
@@ -868,7 +944,7 @@ def spawn_bwrap_dropped(bwrap_args: list[str]) -> subprocess.Popen:
         "--",
         *with_share_net(bwrap_args),
     ]
-    log.debug("spawn: %s", " ".join(cmd))
+    log_cmdline(cmd, label="setpriv")
     return subprocess.Popen(cmd)
 
 
@@ -1054,9 +1130,12 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
 def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
     """Run bwrap under the requested network mode."""
     if net.mode == "host":
-        return subprocess.run(with_share_net(bwrap_args), check=False).returncode
+        cmd = with_share_net(bwrap_args)
+        log_cmdline(cmd, label="bwrap")
+        return subprocess.run(cmd, check=False).returncode
 
     if net.mode == "none":
+        log_cmdline(bwrap_args, label="bwrap")
         return subprocess.run(bwrap_args, check=False).returncode
 
     # filter
@@ -1114,8 +1193,10 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                 # pasta 20250503 returns EACCES for a binary under a 0700 home
                 # (the venv interpreter). /bin/sh is executable by everyone and
                 # then execs the real argv, which newer pasta can do directly too.
+                extra, shell, pipe_stderr = _pasta_debug_launch(tmp_path)
                 cmd = [
                     helper,
+                    *extra,
                     # Skip the host IPv6 route scan and resolv.conf read. Without
                     # these, pasta warns "No interfaces with usable IPv6 routes"
                     # and "Couldn't get any nameserver address" and still
@@ -1133,11 +1214,29 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                     "--",
                     "/bin/sh",
                     "-c",
-                    'exec "$@"',
+                    shell,
                     "buddelkiste-pasta",
                     *inner,
                 ]
-                log.debug("launch pasta filter: %s", " ".join(cmd))
+                log_cmdline(cmd, label="pasta")
+                if pipe_stderr:
+                    proc = subprocess.Popen(cmd, env=child_env, stderr=subprocess.PIPE)
+                    follower = None
+                    if isinstance(proc.stderr, BufferedIOBase):
+                        follower = relay_debug_stream(proc.stderr, "pasta")
+                    try:
+                        return proc.wait()
+                    finally:
+                        if follower is not None:
+                            follower.join(timeout=2)
+                if "--log-file" in extra:
+                    stop = threading.Event()
+                    follower = relay_debug_file(tmp_path / "pasta.log", "pasta", stop)
+                    try:
+                        return subprocess.run(cmd, check=False, env=child_env).returncode
+                    finally:
+                        stop.set()
+                        follower.join(timeout=2)
                 return subprocess.run(cmd, check=False, env=child_env).returncode
 
             # slirp4netns must run in the host netns. Its NAT sockets are the
@@ -1154,7 +1253,7 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                 *inner,
                 "--start-slirp",
             ]
-            log.debug("launch slirp filter: %s", " ".join(cmd))
+            log_cmdline(cmd, label="unshare")
             child = subprocess.Popen(cmd, env=child_env)
             slirp_proc = None
             try:

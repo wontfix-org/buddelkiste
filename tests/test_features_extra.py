@@ -247,7 +247,10 @@ def _listen_for_agent(monkeypatch: pytest.MonkeyPatch) -> list[socket.socket]:
 
 
 def test_ssh_agent_adds_key_and_stops(
-    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     home = tmp_path / "home"
     ssh_dir = home / ".ssh"
@@ -265,12 +268,14 @@ def test_ssh_agent_adds_key_and_stops(
 
     monkeypatch.setattr("buddelkiste.features.subprocess.run", fake_run)
     try:
-        with SshAgent() as agent:
+        with caplog.at_level(logging.DEBUG, logger="buddelkiste"), SshAgent() as agent:
             assert agent.socket is not None
             assert agent.socket.is_socket()
             agent.add_key(key)
         assert added[0][0][:3] == ["ssh-add", "-q", str(key)]
         assert added[0][1]["SSH_AUTH_SOCK"].endswith("/sock")
+        assert "Running ssh-agent:" in caplog.text
+        assert "Running ssh-add:" in caplog.text
     finally:
         for listener in listeners:
             listener.close()

@@ -24,7 +24,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("usage: python -m buddelkiste.network_inner NET.json BWRAP.json [--start-slirp]")
 
     logging.basicConfig(
-        level=logging.DEBUG if os.environ.get("BUDDELKISTE_DEBUG") else logging.WARNING
+        level=logging.DEBUG if os.environ.get("BUDDELKISTE_DEBUG") else logging.WARNING,
+        format="%(levelname)s %(name)s [netns]: %(message)s",
     )
 
     net_data = json.loads(Path(argv[0]).read_text(encoding="utf-8"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -410,7 +411,7 @@ def test_short_instance_base_fits_containerd_sock(
 
 
 def test_docker_instance_setup_proxy_args(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Setup yields DOCKER_HOST when daemon start is stubbed."""
     import socket
@@ -506,15 +507,19 @@ def test_docker_instance_setup_proxy_args(
     monkeypatch.setattr("buddelkiste.docker_instance.DockerProxyServer", FakeProxy)
 
     try:
-        with docker_instance_setup(
-            instance=DockerInstanceConfig(proxy=True),
-            runtime_dir=run,
-        ) as args:
+        with (
+            caplog.at_level(logging.DEBUG, logger="buddelkiste"),
+            docker_instance_setup(
+                instance=DockerInstanceConfig(proxy=True),
+                runtime_dir=run,
+            ) as args,
+        ):
             assert args[args.index("--setenv") + 1] == "DOCKER_HOST"
             assert args[args.index("--setenv") + 2].startswith("unix://")
             assert "--ro-bind" in args
             assert started
             assert started[0].listen.exists()  # type: ignore[attr-defined]
+            assert "Running rootlesskit:" in caplog.text
     finally:
         try:
             listen_sock.close()

@@ -1021,7 +1021,9 @@ def test_notify_pending_image_approval_best_effort(
         "buddelkiste.docker_proxy.which", lambda name: f"/usr/bin/{name}"
     )
     monkeypatch.setattr("buddelkiste.docker_proxy.subprocess.Popen", fake_popen)
-    _notify_pending_image_approval("deadbeef", "evil:1")
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        _notify_pending_image_approval("deadbeef", "evil:1")
+    assert "Running notify-send:" in caplog.text
     assert len(calls) == 1
     assert calls[0][0] == "/usr/bin/notify-send"
     assert "evil:1" in calls[0][-1]

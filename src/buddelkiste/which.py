@@ -8,8 +8,10 @@ instead of :func:`shutil.which`.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 # Not on a typical user PATH. Searched after PATH so an earlier match wins.
@@ -46,3 +48,20 @@ def path_with_tools(tools: tuple[str, ...], base: str | None = None) -> str:
         if directory not in parts:
             parts.insert(0, directory)
     return os.pathsep.join(parts)
+
+
+def log_cmdline(cmdline: Sequence[str], *, label: str) -> None:
+    """Log ``cmdline`` at DEBUG, grouped the way ``bk run --debug`` prints bwrap.
+
+    Uses the ``buddelkiste`` logger so the prefix does not depend on which
+    module launched the command.
+    """
+    logger = logging.getLogger("buddelkiste")
+    logger.debug("Running %s:", label)
+    group = [cmdline[0]]
+    for arg in cmdline[1:]:
+        if arg.startswith("-"):
+            logger.debug("  %s", " ".join(group))
+            group.clear()
+        group.append(arg)
+    logger.debug("  %s", " ".join(group))

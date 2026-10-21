@@ -203,6 +203,7 @@ def test_nft_element_invokes_nft_and_logs_failures(
         "8080",
         "}",
     ]
+    assert "Running nft:" in caplog.text
     assert "no such table" in caplog.text
     assert "from-stdout" in caplog.text
     assert "delete element 1" in caplog.text

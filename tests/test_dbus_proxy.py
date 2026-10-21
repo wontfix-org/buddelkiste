@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -169,7 +170,7 @@ def test_resolve_dbus_proxy_rejects_unknown_key_and_bad_type() -> None:
 
 
 def test_dbus_proxy_setup_uses_resolved_rules(
-    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     (runtime_dir / "bus").touch()
     monkeypatch.setattr(
@@ -202,12 +203,13 @@ def test_dbus_proxy_setup_uses_resolved_rules(
 
     monkeypatch.setattr("buddelkiste.features.subprocess.Popen", fake_popen)
 
-    with dbus_proxy_setup():
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"), dbus_proxy_setup():
         cmd = captured["cmd"]
         assert "--filter" in cmd
         assert "--talk=org.freedesktop.Notifications" in cmd
         assert "--own=org.example.MyApp" in cmd
         assert "--see=*" not in cmd
+        assert "Running xdg-dbus-proxy:" in caplog.text
 
     captured["listener"].close()
 

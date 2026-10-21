@@ -15,6 +15,8 @@ import socket
 import subprocess
 import threading
 
+from buddelkiste.which import log_cmdline
+
 log = logging.getLogger(__name__)
 
 PORT_GATEWAY_ENV = "BUDDELKISTE_HOST_PORT_GATEWAY"
@@ -83,18 +85,20 @@ def _http_get(sock_path: str, path: str, timeout: float = 2.0) -> bytes:
 
 
 def _nft_element(action: str, port: int) -> None:
+    cmd = [
+        "nft",
+        action,
+        "element",
+        "inet",
+        "buddelkiste",
+        "fwd_ports",
+        "{",
+        str(port),
+        "}",
+    ]
+    log_cmdline(cmd, label="nft")
     proc = subprocess.run(
-        [
-            "nft",
-            action,
-            "element",
-            "inet",
-            "buddelkiste",
-            "fwd_ports",
-            "{",
-            str(port),
-            "}",
-        ],
+        cmd,
         check=False,
         capture_output=True,
         text=True,

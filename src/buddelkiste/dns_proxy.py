@@ -12,6 +12,8 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from buddelkiste.which import log_cmdline
+
 log = logging.getLogger(__name__)
 
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
@@ -509,6 +511,7 @@ def nft_add_allow_ip(ip: str, ttl: int) -> None:
         f"{ip} timeout {timeout}s",
         "}",
     ]
+    log_cmdline(cmd, label="nft")
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if proc.returncode != 0:
         log.warning("nft add element failed: %s", proc.stderr.strip() or proc.stdout.strip())

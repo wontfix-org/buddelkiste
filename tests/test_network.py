@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,6 +19,8 @@ from buddelkiste.network import (
     expand_deny_presets,
     format_deny_presets_help,
     load_deny_preset_registry,
+    relay_debug_file,
+    relay_debug_stream,
     resolv_conf_nameservers,
     resolve_network,
     run_bwrap,
@@ -320,7 +327,9 @@ def test_with_share_net_inserts_after_unshare_all() -> None:
     ]
 
 
-def test_run_bwrap_host_shares_net(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_bwrap_host_shares_net(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     captured: dict = {}
 
     def fake_run(args, check=False):
@@ -328,9 +337,11 @@ def test_run_bwrap_host_shares_net(monkeypatch: pytest.MonkeyPatch) -> None:
         return MagicMock(returncode=7)
 
     monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
-    code = run_bwrap(["bwrap", "--unshare-all", "--", "true"], NetworkConfig(mode="host"))
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        code = run_bwrap(["bwrap", "--unshare-all", "--", "true"], NetworkConfig(mode="host"))
     assert code == 7
     assert "--share-net" in captured["args"]
+    assert "Running bwrap:" in caplog.text
 
 
 def test_run_bwrap_none_no_share_net(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,6 +371,7 @@ def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
     def which(name: str):
         return {
             "nft": "/usr/bin/nft",
@@ -389,12 +401,126 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "--map-host-loopback" in captured["args"]
     assert captured["args"][captured["args"].index("--map-host-loopback") + 1] == "none"
     assert captured["args"][captured["args"].index("--") + 1] == "/bin/sh"
+    assert "--debug" not in captured["args"]
+    assert "--log-file" not in captured["args"]
+    assert captured["args"][captured["args"].index("-c") + 1] == 'exec "$@"'
+
+
+def _pasta_which(name: str) -> str | None:
+    return {
+        "nft": "/usr/bin/nft",
+        "setpriv": "/usr/bin/setpriv",
+        "pasta": "/usr/bin/pasta",
+    }.get(name)
+
+
+def test_run_bwrap_filter_pasta_debug_tty(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    monkeypatch.setenv("BUDDELKISTE_DEBUG", "1")
+    monkeypatch.setattr("buddelkiste.network.sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr("buddelkiste.network.which", _pasta_which)
+    captured: dict = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["stderr"] = kwargs.get("stderr")
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, "rb")
+        os.write(write_fd, b"pasta says hi\n")
+        os.close(write_fd)
+        proc = MagicMock()
+        proc.stderr = stream
+        proc.wait.return_value = 0
+        return proc
+
+    monkeypatch.setattr("buddelkiste.network.subprocess.Popen", fake_popen)
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        code = run_bwrap(
+            ["bwrap", "--unshare-all", "--", "true"],
+            NetworkConfig(mode="filter"),
+        )
+    assert code == 0
+    assert "--debug" in captured["args"]
+    assert "--log-file" not in captured["args"]
+    assert captured["stderr"] is subprocess.PIPE
+    assert captured["args"][captured["args"].index("-c") + 1] == 'exec 2>/dev/tty; exec "$@"'
+    assert "Running pasta:" in caplog.text
+    assert "pasta: pasta says hi" in caplog.text
+
+
+def test_run_bwrap_filter_pasta_debug_log_file(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    monkeypatch.setenv("BUDDELKISTE_DEBUG", "1")
+    monkeypatch.setattr("buddelkiste.network.sys.stderr.isatty", lambda: False)
+    monkeypatch.setattr("buddelkiste.network.which", _pasta_which)
+    captured: dict = {}
+
+    def fake_run(args, check=False, **_kwargs):
+        captured["args"] = list(args)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        code = run_bwrap(
+            ["bwrap", "--unshare-all", "--", "true"],
+            NetworkConfig(mode="filter"),
+        )
+    assert code == 0
+    assert "--debug" in captured["args"]
+    log_file = captured["args"][captured["args"].index("--log-file") + 1]
+    assert log_file.endswith("/pasta.log")
+    assert captured["args"][captured["args"].index("-c") + 1] == 'exec "$@"'
+    assert "Running pasta:" in caplog.text
+
+
+def _relay_pipe(label: str, payload: bytes) -> threading.Thread:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    try:
+        os.write(write_fd, payload)
+    finally:
+        os.close(write_fd)
+    return relay_debug_stream(stream, label)
+
+
+def test_relay_debug_stream_prefixes_lines(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        pasta = _relay_pipe("pasta", b"from-pasta\n")
+        slirp = _relay_pipe("slirp4netns", b"tap ready\n")
+        pasta.join(timeout=2)
+        slirp.join(timeout=2)
+    assert pasta.is_alive() is False
+    assert slirp.is_alive() is False
+    assert "pasta: from-pasta" in caplog.text
+    assert "slirp4netns: tap ready" in caplog.text
+
+
+def test_relay_debug_file_prefixes_lines(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "pasta.log"
+    path.write_bytes(b"route picked\n")
+    stop = threading.Event()
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        thread = relay_debug_file(path, "pasta", stop)
+        deadline = time.monotonic() + 1
+        while "pasta: route picked" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.02)
+        stop.set()
+        thread.join(timeout=2)
+    assert "pasta: route picked" in caplog.text
+    assert thread.is_alive() is False
 
 
 def test_run_bwrap_filter_maps_host_loopback_for_docker_ports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
 
     def which(name: str):
         return {

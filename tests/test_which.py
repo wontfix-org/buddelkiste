@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
-from buddelkiste.which import which
+from buddelkiste.which import log_cmdline, which
 
 
 def test_which_finds_extra_dir_when_path_does_not(
@@ -40,3 +41,15 @@ def test_which_prefers_path_over_extra_dir(
     monkeypatch.setattr("buddelkiste.which.SBIN_DIRS", (str(extra_dir),))
     assert which("iptables") == str(path_dir / "iptables")
     assert which("missing-tool") is None
+
+
+def test_log_cmdline_groups_options(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        log_cmdline(
+            ["pasta", "--ipv4-only", "--dns", "none", "--", "/bin/sh"],
+            label="pasta",
+        )
+    assert "Running pasta:" in caplog.text
+    assert "--ipv4-only" in caplog.text
+    assert "--dns none" in caplog.text
+    assert "-- /bin/sh" in caplog.text

@@ -449,7 +449,9 @@ def test_nft_add_allow_ip(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
         return MagicMock(returncode=0, stderr="", stdout="")
 
     monkeypatch.setattr(dns_proxy.subprocess, "run", fake_run)
-    nft_add_allow_ip("1.2.3.4", 2)
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        nft_add_allow_ip("1.2.3.4", 2)
+    assert "Running nft:" in caplog.text
     assert calls[0][calls[0].index("buddelkiste") + 1] == "dyn_allow4"
     assert "1.2.3.4 timeout 5s" in calls[0]
 
