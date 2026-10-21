@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pwd
+from importlib.metadata import version
 
 import click
 import pytest
@@ -98,6 +99,13 @@ def test_cli_group_help() -> None:
     assert "list-features" in result.output
     assert "list-net-presets" in result.output
     assert "shims" in result.output
+    assert "--version" in result.output
+
+
+def test_cli_version() -> None:
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"bk, version {version('buddelkiste')}"
 
 
 def test_cli_run_help_via_args() -> None:

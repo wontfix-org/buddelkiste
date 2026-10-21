@@ -305,6 +305,7 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 
 
 @click.group(help=__doc__)
+@click.version_option(package_name="buddelkiste", prog_name="bk")
 def cli() -> None:
     """Bubblewrap sandbox CLI."""
 
