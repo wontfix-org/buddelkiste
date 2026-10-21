@@ -1116,6 +1116,16 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                 # then execs the real argv, which newer pasta can do directly too.
                 cmd = [
                     helper,
+                    # Skip the host IPv6 route scan and resolv.conf read. Without
+                    # these, pasta warns "No interfaces with usable IPv6 routes"
+                    # and "Couldn't get any nameserver address" and still
+                    # continues. The sandbox uses the DNS proxy, not pasta's
+                    # advertised resolvers.
+                    "--ipv4-only",
+                    "--dns",
+                    "none",
+                    "--search",
+                    "none",
                     "--config-net",
                     # Newer pasta replaced --disable-host-loopback with this.
                     "--map-host-loopback",

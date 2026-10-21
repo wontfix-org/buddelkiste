@@ -382,9 +382,12 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     assert code == 0
     assert captured["args"][0] == "/usr/bin/pasta"
+    assert "--ipv4-only" in captured["args"]
+    assert captured["args"][captured["args"].index("--dns") + 1] == "none"
+    assert captured["args"][captured["args"].index("--search") + 1] == "none"
     assert "--config-net" in captured["args"]
     assert "--map-host-loopback" in captured["args"]
-    assert "none" in captured["args"]
+    assert captured["args"][captured["args"].index("--map-host-loopback") + 1] == "none"
     assert captured["args"][captured["args"].index("--") + 1] == "/bin/sh"
 
 
