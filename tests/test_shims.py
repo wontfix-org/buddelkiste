@@ -25,6 +25,7 @@ from buddelkiste.shims import (
     render_rc_include,
     render_shim,
     render_shim_env,
+    resolve_run_executable,
     resolve_shim_target,
     shim_decisions_from_config,
     shim_dir,
@@ -215,6 +216,9 @@ def test_is_our_shim_detects_marker(tmp_path: Path) -> None:
     assert is_our_shim(ours) is True
     assert is_our_shim(foreign) is False
     assert is_our_shim(tmp_path / "missing") is False
+    binary = tmp_path / "elf"
+    binary.write_bytes(b"\x7fELF\x02\x01\x01\x00\xf8")
+    assert is_our_shim(binary) is False
 
 
 def test_install_creates_executable_shims(tmp_path: Path) -> None:
@@ -467,6 +471,53 @@ def test_resolve_shim_target_skips_shim_dir(tmp_path: Path) -> None:
     path = f"{wrappers}:{real_dir}"
     assert resolve_shim_target("tool", bin_dir=wrappers, path_value=path) == real
     assert resolve_shim_target("tool", bin_dir=wrappers, path_value=str(wrappers)) is None
+
+
+def test_resolve_shim_target_skips_copied_shim(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    other = tmp_path / "also"
+    real_dir = tmp_path / "real"
+    install_shims(["tool"], bin_dir=wrappers)
+    other.mkdir()
+    copied = other / "tool"
+    copied.write_text(render_shim(), encoding="utf-8")
+    copied.chmod(0o755)
+    real_dir.mkdir()
+    real = real_dir / "tool"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+
+    path = f"{other}:{real_dir}"
+    assert resolve_shim_target("tool", bin_dir=wrappers, path_value=path) == real
+
+
+def test_resolve_run_executable_skips_shim_dir(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    real_dir = tmp_path / "real"
+    install_shims(["tool"], bin_dir=wrappers)
+    real_dir.mkdir()
+    real = real_dir / "tool"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+
+    path = f"{wrappers}:{real_dir}"
+    assert resolve_run_executable("tool", bin_dir=wrappers, path_value=path) == str(real)
+    assert resolve_run_executable(str(real), bin_dir=wrappers, path_value=path) == str(real)
+
+
+def test_resolve_run_executable_refuses_shim_path(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    install_shims(["tool"], bin_dir=wrappers)
+    shim = wrappers / "tool"
+    with pytest.raises(click.ClickException, match="PATH shim"):
+        resolve_run_executable(str(shim), bin_dir=wrappers, path_value=str(wrappers))
+    with pytest.raises(click.ClickException, match="PATH shim"):
+        resolve_run_executable(
+            "shims/tool",
+            bin_dir=wrappers,
+            path_value=str(wrappers),
+            cwd=tmp_path,
+        )
 
 
 def test_list_shim_names_includes_leftover_installed(tmp_path: Path) -> None:

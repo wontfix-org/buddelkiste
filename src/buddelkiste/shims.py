@@ -192,7 +192,7 @@ def is_our_shim(path: Path) -> bool:
     """True if ``path`` is a buddelkiste-managed shim (any marker version)."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
     for line in text.splitlines()[:8]:
         if line.startswith(SHIM_MARKER_PREFIX):
@@ -248,9 +248,41 @@ def resolve_shim_target(
         if _same_path(directory, target_dir):
             continue
         candidate = directory / name
-        if _is_executable(candidate):
+        if _is_executable(candidate) and not is_our_shim(candidate):
             return candidate
     return None
+
+
+def resolve_run_executable(
+    executable: str,
+    *,
+    bin_dir: Path | None = None,
+    path_value: str | None = None,
+    cwd: Path | None = None,
+) -> str:
+    """Resolve ``executable`` for ``bk run``, never selecting a managed shim.
+
+    Bare names walk PATH outside the shim directory (and skip any other
+    managed shim files). An explicit path that is a managed shim is rejected
+    so ``bk run`` cannot nest through a wrapper. Other path-like values are
+    returned unchanged.
+    """
+    path = Path(executable)
+    explicit_path = path.is_absolute() or os.sep in executable
+    if explicit_path:
+        here = cwd if cwd is not None else Path.cwd()
+        check = path if path.is_absolute() else here / path
+        if is_our_shim(check):
+            raise click.ClickException(
+                f"{executable} is a buddelkiste PATH shim; pass the host binary "
+                "or a bare command name"
+            )
+        return executable
+
+    real = resolve_shim_target(executable, bin_dir=bin_dir, path_value=path_value)
+    if real is not None:
+        return os.fspath(real)
+    return executable
 
 
 def installed_shim_names(*, bin_dir: Path | None = None) -> list[str]:

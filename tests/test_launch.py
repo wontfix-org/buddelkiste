@@ -3,16 +3,41 @@ from __future__ import annotations
 import os
 import pwd
 from importlib.metadata import version
+from pathlib import Path
 
 import click
 import pytest
 from click.testing import CliRunner
 
 from buddelkiste.cli import append_executable_args, cli, resolve_launch_command
+from buddelkiste.shims import install_shims
 
 
 def test_resolve_launch_command_uses_args() -> None:
     assert resolve_launch_command(["/bin/echo", "hi"]) == ["/bin/echo", "hi"]
+
+
+def test_resolve_launch_command_resolves_bare_name_past_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrappers = tmp_path / "shims"
+    real_dir = tmp_path / "bin"
+    install_shims(["tool"], bin_dir=wrappers)
+    real_dir.mkdir()
+    real = real_dir / "tool"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{wrappers}:{real_dir}")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert resolve_launch_command(["tool", "--flag"]) == [str(real), "--flag"]
+
+
+def test_resolve_launch_command_refuses_shim_path(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    install_shims(["tool"], bin_dir=wrappers)
+    with pytest.raises(click.ClickException, match="PATH shim"):
+        resolve_launch_command([str(wrappers / "tool")])
 
 
 def test_resolve_launch_command_falls_back_to_shell() -> None:

@@ -293,6 +293,7 @@ from buddelkiste.shims import (
     install_shims_from_config,
     list_shim_names,
     list_shims,
+    resolve_run_executable,
     shim_decisions_from_config,
     shim_dir,
     shim_dir_on_path,
@@ -1321,15 +1322,18 @@ def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequen
 def resolve_launch_command(args: list[str]) -> list[str]:
     """Return the command to run in the sandbox.
 
-    Uses the command-line arguments as the executable and its args. If none are
-    given, falls back to an interactive login shell.
+    Uses the command-line arguments as the executable and its args. Bare names
+    are resolved on PATH while skipping buddelkiste shims, so the sandbox execs
+    the host binary instead of the wrapper (which would run ``bk run`` again).
+    An explicit path to a managed shim is rejected. If no command is given,
+    falls back to an interactive login shell.
     """
     if args in (["--help"], ["-h"]):
         click.echo(click.get_current_context().get_help())
         raise SystemExit(0)
 
     if args:
-        return args
+        return [resolve_run_executable(args[0]), *args[1:]]
 
     pwent = pwd.getpwuid(os.getuid())
     return [pwent.pw_shell, "-si", "--"]
