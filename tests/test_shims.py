@@ -406,6 +406,35 @@ def test_check_warns_when_original_first(tmp_path: Path) -> None:
     assert str(real) in issues[0].message
 
 
+def test_check_flags_paths_install_would_refuse(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    wrappers.mkdir()
+    foreign = wrappers / "tool"
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    blocked = wrappers / "other"
+    blocked.mkdir()
+    snippet = tmp_path / "shims.sh"
+    snippet.write_text("# not ours\n", encoding="utf-8")
+
+    issues = {
+        issue.name: issue.message
+        for issue in check_shims(
+            ["tool", "other", "fresh"],
+            bin_dir=wrappers,
+            path_value=f"{wrappers}:/usr/bin",
+            env_path=snippet,
+        )
+    }
+    assert "--force" in issues["tool"]
+    assert "bypass the sandbox" not in issues["tool"]
+    assert "cannot replace" in issues["other"]
+    assert "--force" not in issues["other"]
+    assert "no shim installed" in issues["fresh"]
+    assert "--force" in issues["shims.sh"]
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho stock\n"
+    assert blocked.is_dir()
+
+
 def test_shim_dir_on_path(tmp_path: Path) -> None:
     wrappers = tmp_path / "shims"
     wrappers.mkdir()
@@ -593,6 +622,44 @@ def test_cli_shims_check_fails_on_shadow(
     quiet = CliRunner().invoke(cli, ["shims", "check", "--quiet"])
     assert quiet.exit_code == 1
     assert "bypass the sandbox" in quiet.output
+    assert "OK:" not in quiet.output
+
+
+def test_cli_shims_check_fails_when_install_needs_force(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    data = home / ".local" / "share" / "buddelkiste"
+    data.mkdir(parents=True)
+    foreign = data / "shims" / "cursor-agent"
+    foreign.parent.mkdir()
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    snippet = data / "shims.sh"
+    snippet.write_text("# not ours\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", f"{foreign.parent}:/usr/bin")
+    tmp_config.write_text(
+        "[executables.cursor-agent]\nfeatures = [\"cursor\"]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["shims", "check"])
+    assert result.exit_code == 1, result.output
+    assert "--force" in result.output
+    assert str(foreign) in result.output
+    assert str(snippet) in result.output
+    assert "no shim installed" not in result.output
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho stock\n"
+    assert snippet.read_text(encoding="utf-8") == "# not ours\n"
+
+    quiet = runner.invoke(cli, ["shims", "check", "-q"])
+    assert quiet.exit_code == 1
+    assert "--force" in quiet.output
     assert "OK:" not in quiet.output
 
 

@@ -528,13 +528,43 @@ class ShimCheckIssue:
     message: str
 
 
+def _install_refusal(path: Path, marker_prefix: str) -> str | None:
+    """Why ``install`` without ``--force`` would skip ``path``.
+
+    ``needs-force`` is a foreign regular file or symlink. ``blocked`` is a
+    directory or other path ``--force`` still will not replace. ``None`` means
+    install can create or refresh the managed file.
+    """
+    if _claim_path(path, force=False, marker_prefix=marker_prefix) != "skipped":
+        return None
+    if _can_force_replace(path):
+        return "needs-force"
+    return "blocked"
+
+
+def _refusal_issue(name: str, path: Path, *, kind: str, refusal: str) -> ShimCheckIssue:
+    if refusal == "needs-force":
+        detail = "`bk shims install` needs --force to replace it"
+    else:
+        detail = "`bk shims install` cannot replace it"
+    return ShimCheckIssue(
+        name,
+        f"{path} is not a buddelkiste {kind}; {detail}",
+    )
+
+
 def check_shims(
     names: list[str],
     *,
     bin_dir: Path | None = None,
     path_value: str | None = None,
+    env_path: Path | None = None,
 ) -> list[ShimCheckIssue]:
-    """Return issues where a non-shim executable would win over our shim on PATH."""
+    """Return issues where shims would miss PATH or install would need ``--force``.
+
+    ``env_path``, when set, is the shell snippet. A foreign file there makes
+    ``bk shims install`` refuse to write unless ``--force`` is passed.
+    """
     target_dir = bin_dir if bin_dir is not None else shim_dir()
     path_dirs = _path_entries(path_value)
     issues: list[ShimCheckIssue] = []
@@ -551,6 +581,11 @@ def check_shims(
 
     for name in names:
         shim_path = target_dir / name
+        refusal = _install_refusal(shim_path, SHIM_MARKER_PREFIX)
+        if refusal is not None:
+            issues.append(_refusal_issue(name, shim_path, kind="shim", refusal=refusal))
+            continue
+
         first: Path | None = None
         for directory in path_dirs:
             candidate = directory / name
@@ -591,5 +626,12 @@ def check_shims(
                 f"at {shim_path}; calls to {name!r} will bypass the sandbox",
             )
         )
+
+    if env_path is not None:
+        refusal = _install_refusal(env_path, ENV_MARKER_PREFIX)
+        if refusal is not None:
+            issues.append(
+                _refusal_issue(env_path.name, env_path, kind="shell snippet", refusal=refusal)
+            )
 
     return issues

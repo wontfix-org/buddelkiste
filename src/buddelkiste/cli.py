@@ -298,6 +298,7 @@ from buddelkiste.shims import (
     shim_decisions_from_config,
     shim_dir,
     shim_dir_on_path,
+    shim_env_path,
     shim_names_from_config,
 )
 from buddelkiste.which import log_cmdline
@@ -811,7 +812,8 @@ def shims_group() -> None:
     ``# buddelkiste-shim:`` marker so ``install`` can refresh or remove our
     own files without clobbering unrelated binaries of the same name.
     ``install --force`` replaces those binaries (and an unmanaged shell
-    snippet). Directories are never replaced.
+    snippet). Directories are never replaced. ``check`` fails when install
+    would need ``--force`` for a shim or for the shell snippet.
     """
 
 
@@ -889,22 +891,20 @@ def shims_install(*, force: bool) -> None:
     help="Only print warnings; omit the success and empty-config lines.",
 )
 def shims_check(*, quiet: bool) -> None:
-    """Warn if originals on PATH would bypass installed shims."""
+    """Warn if PATH would bypass shims, or install would need --force."""
     config = load_config()
     decisions = shim_decisions_from_config(config)
-    if not decisions:
-        if not quiet:
-            click.echo("No [executables] entries in config; nothing to check.", err=True)
-        return
-
-    names = shim_names_from_config(config)
-    if not names:
-        if not quiet:
-            click.echo("All configured executables have shimming disabled; nothing to check.")
-        return
-
-    issues = check_shims(names, bin_dir=shim_dir())
+    names = shim_names_from_config(config) if decisions else []
+    issues = check_shims(names, bin_dir=shim_dir(), env_path=shim_env_path())
     if not issues:
+        if not decisions:
+            if not quiet:
+                click.echo("No [executables] entries in config; nothing to check.", err=True)
+            return
+        if not names:
+            if not quiet:
+                click.echo("All configured executables have shimming disabled; nothing to check.")
+            return
         if not quiet:
             click.echo(f"OK: {len(names)} shim(s) intercept PATH correctly.")
         return

@@ -304,12 +304,14 @@ shim = false
 ```bash
 bk shims install          # create/update/remove shims and the shell hook
 bk shims install --force  # also replace unmanaged files in the way
-bk shims check     # warn if an original binary appears earlier on PATH
+bk shims check     # warn if PATH would bypass a shim, or install needs --force
 bk shims check -q  # warnings only (used by the startup snippet)
 bk shims list      # configured/installed shims and the binaries they wrap
 ```
 
-`bk shims check` exits non-zero when something would bypass the sandbox.
+`bk shims check` exits non-zero when something would bypass the sandbox, or
+when a configured shim path or `shims.sh` is occupied by a file `install`
+would refuse to replace without `--force`.
 
 ### Python features (entry points)
 
