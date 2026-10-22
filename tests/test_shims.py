@@ -254,6 +254,56 @@ def test_install_skips_foreign_and_updates_ours(tmp_path: Path) -> None:
     assert again[0].action == "unchanged"
 
 
+def test_install_force_replaces_foreign_file_not_directory(tmp_path: Path) -> None:
+    wrappers = tmp_path / "bin"
+    wrappers.mkdir()
+    foreign = wrappers / "python"
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    directory = wrappers / "node"
+    directory.mkdir()
+
+    skipped = install_shims(["python", "node"], bin_dir=wrappers, force=True)
+    by_name = {r.name: r for r in skipped}
+    assert by_name["python"].action == "updated"
+    assert is_our_shim(foreign)
+    assert foreign.stat().st_mode & stat.S_IXUSR
+    assert by_name["node"].action == "skipped"
+    assert directory.is_dir()
+
+
+def test_install_force_replaces_symlink_without_touching_target(tmp_path: Path) -> None:
+    wrappers = tmp_path / "bin"
+    wrappers.mkdir()
+    target = tmp_path / "real-python"
+    original = "#!/bin/sh\necho stock\n"
+    target.write_text(original, encoding="utf-8")
+    link = wrappers / "python"
+    link.symlink_to(target)
+
+    skipped = install_shims(["python"], bin_dir=wrappers)
+    assert skipped[0].action == "skipped"
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == original
+
+    forced = install_shims(["python"], bin_dir=wrappers, force=True)
+    assert forced[0].action == "updated"
+    assert not link.is_symlink()
+    assert is_our_shim(link)
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_install_does_not_remove_foreign_file_when_disabled(tmp_path: Path) -> None:
+    wrappers = tmp_path / "bin"
+    wrappers.mkdir()
+    foreign = wrappers / "python"
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    config = {"executables": {"python": {"shim": False}}}
+
+    results = install_shims_from_config(config, bin_dir=wrappers, force=True)
+    assert [r.action for r in results] == ["skipped"]
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho stock\n"
+
+
 def test_install_shim_hook_writes_snippet_and_existing_rc(
     monkeypatch,
     tmp_path: Path,
@@ -291,6 +341,27 @@ def test_install_shim_hook_writes_snippet_and_existing_rc(
     assert again[".bashrc"].action == "unchanged"
     assert again[".zshrc"].action == "unchanged"
     assert bashrc.read_text(encoding="utf-8").count(HOOK_BEGIN) == 1
+
+
+def test_install_shim_hook_skips_foreign_snippet_unless_forced(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env_path = home / ".local" / "share" / "buddelkiste" / "shims.sh"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("# not ours\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    results = {r.name: r for r in install_shim_hook()}
+    assert results["shims.sh"].action == "skipped"
+    assert env_path.read_text(encoding="utf-8") == "# not ours\n"
+
+    forced = {r.name: r for r in install_shim_hook(force=True)}
+    assert forced["shims.sh"].action == "updated"
+    assert ENV_MARKER in env_path.read_text(encoding="utf-8")
 
 
 def test_install_shim_hook_skips_missing_rc(monkeypatch, tmp_path: Path) -> None:
@@ -387,6 +458,87 @@ def test_cli_shims_install_and_check(
     quiet = runner.invoke(cli, ["shims", "check", "-q"])
     assert quiet.exit_code == 0, quiet.output
     assert quiet.output == ""
+
+
+def test_cli_shims_install_refuses_foreign_without_force(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    wrappers = home / ".local" / "share" / "buddelkiste" / "shims"
+    wrappers.mkdir(parents=True)
+    foreign = wrappers / "cursor-agent"
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    tmp_config.write_text(
+        "[executables.cursor-agent]\nfeatures = [\"cursor\"]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    refused = runner.invoke(cli, ["shims", "install"])
+    assert refused.exit_code == 1, refused.output
+    assert "Refusing to overwrite" in refused.output
+    assert "--force" in refused.output
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho stock\n"
+    assert "skipped" in refused.output
+
+    forced = runner.invoke(cli, ["shims", "install", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "updated" in forced.output
+    assert is_our_shim(foreign)
+
+
+def test_cli_shims_install_force_still_refuses_directory(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    blocked = home / ".local" / "share" / "buddelkiste" / "shims" / "cursor-agent"
+    blocked.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    tmp_config.write_text(
+        "[executables.cursor-agent]\nfeatures = [\"cursor\"]\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["shims", "install", "--force"])
+    assert result.exit_code == 1, result.output
+    assert "not regular files" in result.output
+    assert blocked.is_dir()
+
+
+def test_cli_shims_install_keeps_foreign_file_when_shim_disabled(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    wrappers = home / ".local" / "share" / "buddelkiste" / "shims"
+    wrappers.mkdir(parents=True)
+    foreign = wrappers / "python"
+    foreign.write_text("#!/bin/sh\necho stock\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("PATH", f"{wrappers}:/usr/bin")
+    tmp_config.write_text(
+        "[executables.python]\nshim = false\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["shims", "install", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "not removed" in result.output
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho stock\n"
 
 
 def test_cli_shims_install_notes_new_shell_when_hook_not_loaded(

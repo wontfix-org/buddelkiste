@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 RUN_HELP = """Run a command inside a bubblewrap sandbox.
 
 Pass the executable and its arguments after any wrapper options. They are run
-inside the sandbox. Wrapper options are --debug, feature toggles, network
+inside the sandbox. Wrapper options are --debug, --debug-file, feature toggles, network
 controls, and dbus-proxy filters; everything else is forwarded as the
 sandboxed command.
 
@@ -265,6 +265,7 @@ Non-interactively it exits with an error instead.
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
 from buddelkiste.conflicts import check_launch_conflicts
+from buddelkiste.debuglog import apply_debug_log_env
 from buddelkiste.docker_instance import STORAGE_DRIVERS
 from buddelkiste.features import (
     FEATURES,
@@ -322,9 +323,16 @@ def cli() -> None:
 )
 @click.option(
     "--debug",
-    help="Enable debug logging",
+    help="Enable debug logging on stderr.",
     is_flag=True,
     default=False,
+)
+@click.option(
+    "--debug-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write debug logging to this file instead of stderr. "
+    "With --debug, write to both. The file is replaced on each run.",
 )
 @click.option(
     "--feature",
@@ -433,6 +441,7 @@ def cli() -> None:
 )
 def run(
     debug: bool,
+    debug_file: Path | None,
     enable_features: tuple[str, ...],
     disable_features: tuple[str, ...],
     network_mode: str | None,
@@ -450,10 +459,8 @@ def run(
     dbus_broadcast: tuple[str, ...],
     args: list[str],
 ) -> None:
-    logging.basicConfig(
-        level="DEBUG" if debug else "WARNING",
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    apply_debug_log_env(debug=debug, debug_file=debug_file)
+    debug_on = debug or debug_file is not None
 
     config = load_config()
     command = resolve_launch_command(args)
@@ -536,7 +543,7 @@ def run(
             *command,
         ]
 
-        if debug:
+        if debug_on:
             log_cmdline(bwrap_args, label="bwrap")
             log.debug(
                 "network mode=%s policy=%s allow=%s deny=%s allow_hosts=%s deny_hosts=%s",
@@ -552,7 +559,6 @@ def run(
                 [host for host in net.allow_hosts if host.startswith("*.")],
                 [host for host in net.deny_hosts if host.startswith("*.")],
             )
-            os.environ["BUDDELKISTE_DEBUG"] = "1"
 
         exit_code = run_bwrap(bwrap_args, net)
 
@@ -804,17 +810,33 @@ def shims_group() -> None:
     and per-entry ``shim = true/false``. Shims carry a
     ``# buddelkiste-shim:`` marker so ``install`` can refresh or remove our
     own files without clobbering unrelated binaries of the same name.
+    ``install --force`` replaces those binaries (and an unmanaged shell
+    snippet). Directories are never replaced.
     """
 
 
 @shims_group.command("install")
-def shims_install() -> None:
-    """Create or update PATH shims and the interactive shell hook."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Replace existing shim scripts and the shell snippet when they are "
+        "not managed by buddelkiste."
+    ),
+)
+def shims_install(*, force: bool) -> None:
+    """Create or update PATH shims and the interactive shell hook.
+
+    Files that are not buddelkiste shims are left unchanged unless --force
+    is given. Directories are never replaced.
+    """
     config = load_config()
     decisions = shim_decisions_from_config(config)
-    hook_results = install_shim_hook()
+    hook_results = install_shim_hook(force=force)
     wrapper_results = (
-        install_shims_from_config(config, bin_dir=shim_dir()) if decisions else []
+        install_shims_from_config(config, bin_dir=shim_dir(), force=force)
+        if decisions
+        else []
     )
     for result in (*hook_results, *wrapper_results):
         click.echo(f"{result.action:9} {result.path}")
@@ -823,19 +845,40 @@ def shims_install() -> None:
             "Open a new shell to activate the shims.",
             err=True,
         )
+
+    enabled = {name for name, on in decisions.items() if on}
+    refused = [result for result in hook_results if result.action == "skipped"]
+    refused.extend(
+        result
+        for result in wrapper_results
+        if result.action == "skipped" and result.name in enabled
+    )
+    left = [
+        result
+        for result in wrapper_results
+        if result.action == "skipped" and result.name not in enabled
+    ]
     if not decisions:
         click.echo("No [executables] entries in config; no wrappers to install.", err=True)
-        return
-    if not wrapper_results:
+    elif not wrapper_results:
         click.echo("All configured executables have shimming disabled; nothing to do.")
-        return
-    skipped = [r for r in wrapper_results if r.action == "skipped"]
-    if skipped:
+    elif left:
         click.echo(
-            f"Left {len(skipped)} existing non-shim file(s) untouched "
-            "(remove or rename them, then re-run).",
+            f"Left {len(left)} existing non-shim file(s) in place (not removed).",
             err=True,
         )
+    if not refused:
+        return
+    listed = ", ".join(str(result.path) for result in refused)
+    if force:
+        raise click.ClickException(
+            f"Could not replace {len(refused)} path(s) that are not regular files "
+            f"or symlinks ({listed})."
+        )
+    raise click.ClickException(
+        f"Refusing to overwrite {len(refused)} file(s) that are not managed by "
+        f"buddelkiste ({listed}). Re-run with --force to replace them."
+    )
 
 
 @shims_group.command("check")

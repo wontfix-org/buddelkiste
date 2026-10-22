@@ -189,7 +189,12 @@ def render_rc_include(env_path: Path, *, home: Path) -> str:
 
 
 def is_our_shim(path: Path) -> bool:
-    """True if ``path`` is a buddelkiste-managed shim (any marker version)."""
+    """True if ``path`` is a buddelkiste-managed shim (any marker version).
+
+    Follows symlinks, so a PATH entry that points at one of our scripts still
+    counts. Install uses :func:`_has_marker` instead and will not rewrite a
+    symlink in place.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -198,6 +203,55 @@ def is_our_shim(path: Path) -> bool:
         if line.startswith(SHIM_MARKER_PREFIX):
             return True
     return False
+
+
+def _has_marker(path: Path, prefix: str) -> bool:
+    """True if a regular file's leading lines start with ``prefix``.
+
+    Symlinks are not managed files: rewriting one would follow the link and
+    change whatever it points at.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines()[:8]:
+        if line.startswith(prefix):
+            return True
+    return False
+
+
+def _path_occupied(path: Path) -> bool:
+    try:
+        return path.is_symlink() or path.exists()
+    except OSError:
+        return False
+
+
+def _can_force_replace(path: Path) -> bool:
+    """True when ``--force`` may unlink ``path`` without removing a directory."""
+    try:
+        return path.is_symlink() or path.is_file()
+    except OSError:
+        return False
+
+
+def _claim_path(path: Path, *, force: bool, marker_prefix: str) -> str:
+    """Decide how to take ``path`` for a managed rewrite.
+
+    Returns ``create`` (nothing there), ``update`` (regular managed file),
+    ``replaced`` (foreign symlink or regular file unlinked), or ``skipped``.
+    """
+    if not _path_occupied(path):
+        return "create"
+    if _has_marker(path, marker_prefix):
+        return "update"
+    if force and _can_force_replace(path):
+        path.unlink()
+        return "replaced"
+    return "skipped"
 
 
 def _path_entries(path_value: str | None = None) -> list[Path]:
@@ -370,12 +424,15 @@ def install_shims(
     *,
     bin_dir: Path | None = None,
     remove: list[str] | None = None,
+    force: bool = False,
 ) -> list[ShimInstallResult]:
     """Create or refresh shims for ``names`` under the application shim directory.
 
-    Existing non-shim files are left alone (``skipped``). Our own shims are
-    rewritten when their contents differ from the current template. Names in
-    ``remove`` delete a managed shim if present.
+    Existing files that are not regular buddelkiste shims are left alone
+    (``skipped``). ``force`` replaces a foreign regular file or symlink; it
+    does not remove directories. Our own shims are rewritten when their
+    contents differ from the current template. Names in ``remove`` delete a
+    regular managed shim if present and never delete anything else.
     """
     target_dir = bin_dir if bin_dir is not None else shim_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -384,20 +441,20 @@ def install_shims(
 
     for name in remove or ():
         path = target_dir / name
-        if path.exists() and is_our_shim(path):
+        if _has_marker(path, SHIM_MARKER_PREFIX):
             path.unlink()
             results.append(ShimInstallResult(name, path, "removed"))
-        elif path.exists():
+        elif _path_occupied(path):
             results.append(ShimInstallResult(name, path, "skipped"))
 
     for name in names:
         path = target_dir / name
-        if path.exists() and not is_our_shim(path):
+        claim = _claim_path(path, force=force, marker_prefix=SHIM_MARKER_PREFIX)
+        if claim == "skipped":
             results.append(ShimInstallResult(name, path, "skipped"))
             continue
 
-        existed = path.exists()
-        previous = path.read_text(encoding="utf-8") if existed else None
+        previous = path.read_text(encoding="utf-8") if claim == "update" else None
         if previous == body:
             results.append(ShimInstallResult(name, path, "unchanged"))
             continue
@@ -406,7 +463,7 @@ def install_shims(
         mode = path.stat().st_mode
         path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-        action = "updated" if existed else "created"
+        action = "created" if claim == "create" else "updated"
         results.append(ShimInstallResult(name, path, action))
 
     return results
@@ -416,20 +473,26 @@ def install_shims_from_config(
     config: dict,
     *,
     bin_dir: Path | None = None,
+    force: bool = False,
 ) -> list[ShimInstallResult]:
     """Install/update enabled shims and remove managed shims that are disabled."""
     decisions = shim_decisions_from_config(config)
     enabled = [name for name, on in decisions.items() if on]
     disabled = [name for name, on in decisions.items() if not on]
-    return install_shims(enabled, bin_dir=bin_dir, remove=disabled)
+    return install_shims(enabled, bin_dir=bin_dir, remove=disabled, force=force)
 
 
 def install_shim_hook(
     *,
     environ: Mapping[str, str] | None = None,
     home: Path | None = None,
+    force: bool = False,
 ) -> list[ShimInstallResult]:
-    """Write the managed env snippet and include it from existing bash/zsh rc files."""
+    """Write the managed env snippet and include it from existing bash/zsh rc files.
+
+    An existing snippet that lacks the buddelkiste marker is left unchanged
+    unless ``force`` replaces that regular file or symlink.
+    """
     env = environ if environ is not None else os.environ
     home_path = home if home is not None else user_home(environ=env)
     results: list[ShimInstallResult] = []
@@ -437,14 +500,17 @@ def install_shim_hook(
     env_path = shim_env_path(environ=env)
     env_path.parent.mkdir(parents=True, exist_ok=True)
     body = render_shim_env(shim_directory=shim_dir(environ=env), home=home_path)
-    existed = env_path.exists()
-    previous = env_path.read_text(encoding="utf-8") if existed else None
-    if previous == body:
-        results.append(ShimInstallResult(env_path.name, env_path, "unchanged"))
+    claim = _claim_path(env_path, force=force, marker_prefix=ENV_MARKER_PREFIX)
+    if claim == "skipped":
+        results.append(ShimInstallResult(env_path.name, env_path, "skipped"))
     else:
-        env_path.write_text(body, encoding="utf-8")
-        action = "updated" if existed else "created"
-        results.append(ShimInstallResult(env_path.name, env_path, action))
+        previous = env_path.read_text(encoding="utf-8") if claim == "update" else None
+        if previous == body:
+            results.append(ShimInstallResult(env_path.name, env_path, "unchanged"))
+        else:
+            env_path.write_text(body, encoding="utf-8")
+            action = "created" if claim == "create" else "updated"
+            results.append(ShimInstallResult(env_path.name, env_path, action))
 
     block = render_rc_include(env_path, home=home_path)
     for name in RC_FILENAMES:

@@ -41,11 +41,13 @@ bk run --network filter \
   --net-deny-preset metadata …
 ```
 
-`bk run` wrapper options: `--debug`, `--feature` / `--no-feature`,
+`bk run` wrapper options: `--debug`, `--debug-file`, `--feature` / `--no-feature`,
 `--network`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
 `--net-deny`, `--net-deny-preset`,
 `--dbus-see`, `--dbus-talk`, `--dbus-own`, `--dbus-call`, `--dbus-broadcast`.
-Everything else is the sandboxed command.
+Everything else is the sandboxed command. `--debug` logs to stderr.
+`--debug-file PATH` writes that log to a file instead; pass both to keep stderr
+as well. The file is replaced on each run. The netns helper appends to it.
 
 ## Features
 
@@ -274,11 +276,14 @@ writes a small `sh` wrapper into `$XDG_DATA_HOME/buddelkiste/shims` (default
 `~/.local/share/buddelkiste/shims`). The shim resolves the real binary
 (skipping its own directory) and runs `bk run <real> "$@"`. Shims include a
 `# buddelkiste-shim:` marker so later installs can refresh our own files
-without overwriting unrelated binaries.
+without overwriting unrelated binaries. `bk shims install --force` replaces
+those regular files and symlinks; directories are left alone.
 
 Install also writes `$XDG_DATA_HOME/buddelkiste/shims.sh` and, if they
-already exist, appends a marked include to `~/.bashrc` and `~/.zshrc`. Paths
-in those snippets use `$HOME` so the same rc file works for different users.
+already exist, appends a marked include to `~/.bashrc` and `~/.zshrc`. An
+existing `shims.sh` without the buddelkiste marker is left unchanged unless
+`--force` is passed. Paths in those snippets use `$HOME` so the same rc file
+works for different users.
 Interactive shells source the snippet, prepend the shim directory to `PATH`,
 and run `bk shims check --quiet`.
 
@@ -297,7 +302,8 @@ shim = false
 ```
 
 ```bash
-bk shims install   # create/update/remove shims and the shell hook
+bk shims install          # create/update/remove shims and the shell hook
+bk shims install --force  # also replace unmanaged files in the way
 bk shims check     # warn if an original binary appears earlier on PATH
 bk shims check -q  # warnings only (used by the startup snippet)
 bk shims list      # configured/installed shims and the binaries they wrap

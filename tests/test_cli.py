@@ -342,6 +342,72 @@ def test_cli_debug_logs_wildcard_policy(
     assert "allow_hosts=['*.example.com']" in caplog.text
     assert "deny_hosts=['exact.example']" in caplog.text
     assert os.environ.get("BUDDELKISTE_DEBUG") == "1"
+    assert os.environ.get("BUDDELKISTE_DEBUG_FILE") is None
+    assert os.environ.get("BUDDELKISTE_DEBUG_STDERR") is None
+
+
+def test_cli_debug_file_writes_log_without_stderr(
+    prepared_cwd: Path,
+    fake_bwrap,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
+    monkeypatch.delenv("BUDDELKISTE_DEBUG_FILE", raising=False)
+    monkeypatch.delenv("BUDDELKISTE_DEBUG_STDERR", raising=False)
+    log_path = tmp_path / "logs" / "bk-debug.log"
+    result = CliRunner().invoke(
+        cli,
+        ["run", "--debug-file", str(log_path), "--network", "none", "/bin/true"],
+    )
+    assert result.exit_code == 0, result.output
+    text = log_path.read_text(encoding="utf-8")
+    assert "DEBUG buddelkiste: Running bwrap:" in text
+    assert "DEBUG buddelkiste.cli: network mode=none" in text
+    assert "DEBUG buddelkiste" not in result.output
+    assert os.environ["BUDDELKISTE_DEBUG"] == "1"
+    assert os.environ["BUDDELKISTE_DEBUG_FILE"] == str(log_path.resolve())
+    assert os.environ["BUDDELKISTE_DEBUG_STDERR"] == "0"
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("STALE\n")
+    again = CliRunner().invoke(
+        cli,
+        ["run", "--debug-file", str(log_path), "--network", "none", "/bin/true"],
+    )
+    assert again.exit_code == 0, again.output
+    replaced = log_path.read_text(encoding="utf-8")
+    assert "STALE" not in replaced
+    assert "DEBUG buddelkiste.cli: network mode=none" in replaced
+
+
+def test_cli_debug_file_with_debug_keeps_stderr(
+    prepared_cwd: Path,
+    fake_bwrap,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
+    log_path = tmp_path / "bk-debug.log"
+    with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "run",
+                "--debug",
+                "--debug-file",
+                str(log_path),
+                "--network",
+                "none",
+                "/bin/true",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    text = log_path.read_text(encoding="utf-8")
+    assert "DEBUG buddelkiste.cli: network mode=none" in text
+    assert "network mode=none" in caplog.text
+    assert os.environ["BUDDELKISTE_DEBUG_STDERR"] == "1"
 
 
 def test_cli_net_allow_preset(prepared_cwd: Path, fake_bwrap) -> None:

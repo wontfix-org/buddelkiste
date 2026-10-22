@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import logging
-import os
 import sys
 from pathlib import Path
 
 import click
 
+from buddelkiste.debuglog import NETNS_LOG_FORMAT, configure_debug_logging_from_env
 from buddelkiste.network import NetworkConfig, run_network_inner
 
 
@@ -23,10 +22,7 @@ def main(argv: list[str] | None = None) -> None:
     if len(argv) != 2:
         raise SystemExit("usage: python -m buddelkiste.network_inner NET.json BWRAP.json [--start-slirp]")
 
-    logging.basicConfig(
-        level=logging.DEBUG if os.environ.get("BUDDELKISTE_DEBUG") else logging.WARNING,
-        format="%(levelname)s %(name)s [netns]: %(message)s",
-    )
+    configure_debug_logging_from_env(log_format=NETNS_LOG_FORMAT)
 
     net_data = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     bwrap_args = json.loads(Path(argv[1]).read_text(encoding="utf-8"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import click
@@ -115,3 +116,42 @@ def test_network_inner_main_click_exception(
         network_inner.main([str(net_file), str(bwrap_file)])
     assert exc.value.code == 1
     assert "no nft" in capsys.readouterr().err
+
+
+def test_network_inner_appends_debug_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    net_file = tmp_path / "net.json"
+    bwrap_file = tmp_path / "bwrap.json"
+    net_file.write_text(
+        json.dumps(
+            {
+                "mode": "none",
+                "policy": "allow",
+                "allow": [],
+                "deny": [],
+                "allow_hosts": [],
+                "deny_hosts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bwrap_file.write_text(json.dumps(["bwrap", "--", "true"]), encoding="utf-8")
+    log_path = tmp_path / "debug.log"
+    log_path.write_text("DEBUG buddelkiste: already here\n", encoding="utf-8")
+    monkeypatch.setenv("BUDDELKISTE_DEBUG", "1")
+    monkeypatch.setenv("BUDDELKISTE_DEBUG_FILE", str(log_path))
+    monkeypatch.setenv("BUDDELKISTE_DEBUG_STDERR", "0")
+
+    def fake_inner(net, bwrap_args, *, start_slirp):
+        logging.getLogger("buddelkiste.network").debug("from inner")
+        return 0
+
+    monkeypatch.setattr(network_inner, "run_network_inner", fake_inner)
+    with pytest.raises(SystemExit) as exc:
+        network_inner.main([str(net_file), str(bwrap_file)])
+    assert exc.value.code == 0
+    text = log_path.read_text(encoding="utf-8")
+    assert "already here" in text
+    assert "DEBUG buddelkiste.network [netns]: from inner" in text
+    assert "from inner" not in capsys.readouterr().err

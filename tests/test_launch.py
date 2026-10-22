@@ -138,3 +138,4 @@ def test_cli_run_help_via_args() -> None:
     assert result.exit_code == 0
     assert "Run a command inside a bubblewrap sandbox" in result.output
     assert "--debug" in result.output
+    assert "--debug-file" in result.output
