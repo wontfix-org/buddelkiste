@@ -1,6 +1,6 @@
 [project]
 name = "buddelkiste"
-version = "0.4.3"
+version = "0.4.4"
 description = "Run a command inside a bubblewrap sandbox"
 readme = "README.md"
 authors = [
