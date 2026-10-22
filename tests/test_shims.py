@@ -32,6 +32,7 @@ from buddelkiste.shims import (
     shim_dir_on_path,
     shim_env_path,
     shim_names_from_config,
+    shim_targets_from_config,
 )
 
 
@@ -169,6 +170,92 @@ def test_cli_shims_respect_global_off(
     check = CliRunner().invoke(cli, ["shims", "check"])
     assert check.exit_code == 0, check.output
     assert "disabled" in check.output
+
+
+def test_render_shim_uses_configured_absolute_path() -> None:
+    target = Path("/opt/cursor/cursor-agent")
+    body = render_shim(target)
+    assert SHIM_MARKER in body
+    assert f"real={target}" in body
+    assert 'exec "$bk" run "$real" "$@"' in body
+    assert "for p in $PATH" not in body
+
+
+def test_configured_path_rejects_relative_and_expands_home(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    with pytest.raises(click.ClickException, match="absolute"):
+        shim_targets_from_config({"executables": {"tool": {"path": "bin/tool"}}})
+
+    targets = shim_targets_from_config(
+        {"executables": {"tool": {"path": "~/opt/tool"}}}
+    )
+    assert targets == {"tool": home / "opt" / "tool"}
+
+
+def test_install_bakes_configured_path(tmp_path: Path) -> None:
+    wrappers = tmp_path / "bin"
+    target = tmp_path / "real" / "cursor-agent"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    config = {"executables": {"agent": {"path": str(target)}}}
+
+    created = install_shims_from_config(config, bin_dir=wrappers)
+    assert created[0].action == "created"
+    text = (wrappers / "agent").read_text(encoding="utf-8")
+    assert f"real={target}" in text
+    assert "for p in $PATH" not in text
+
+    again = install_shims_from_config(config, bin_dir=wrappers)
+    assert again[0].action == "unchanged"
+
+    other = tmp_path / "other-agent"
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)
+    updated = install_shims_from_config(
+        {"executables": {"agent": {"path": str(other)}}},
+        bin_dir=wrappers,
+    )
+    assert updated[0].action == "updated"
+    assert f"real={other}" in (wrappers / "agent").read_text(encoding="utf-8")
+
+
+def test_check_accepts_configured_path_without_same_name_on_path(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    target = tmp_path / "libexec" / "cursor-agent"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    config = {"executables": {"agent": {"path": str(target)}}}
+    install_shims_from_config(config, bin_dir=wrappers)
+
+    issues = check_shims(
+        ["agent"],
+        bin_dir=wrappers,
+        path_value=f"{wrappers}:/usr/bin",
+        targets=shim_targets_from_config(config),
+    )
+    assert issues == []
+
+
+def test_check_warns_when_configured_path_missing_or_shim_stale(tmp_path: Path) -> None:
+    wrappers = tmp_path / "shims"
+    missing = tmp_path / "missing-agent"
+    config = {"executables": {"agent": {"path": str(missing)}}}
+    install_shims(["agent"], bin_dir=wrappers)
+    issues = check_shims(
+        ["agent"],
+        bin_dir=wrappers,
+        path_value=f"{wrappers}:/usr/bin",
+        targets=shim_targets_from_config(config),
+    )
+    messages = [issue.message for issue in issues]
+    assert any("not an executable file" in message for message in messages)
+    assert any("does not execute" in message for message in messages)
 
 
 def test_render_shim_has_marker_and_bk_run() -> None:
@@ -795,3 +882,40 @@ def test_cli_shims_list_shows_real_executable(
     assert result.exit_code == 0, result.output
     assert f"cursor-agent  {real}" in result.output
     assert "missing       -" in result.output
+
+
+def test_cli_shims_list_and_check_use_configured_path(
+    tmp_path: Path,
+    tmp_config: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "opt" / "cursor-agent"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    wrappers = home / ".local" / "share" / "buddelkiste" / "shims"
+    monkeypatch.setenv("PATH", f"{wrappers}:/usr/bin")
+    tmp_config.write_text(
+        "[executables.agent]\n"
+        f'path = "{target}"\n'
+        'features = ["cursor"]\n',
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    installed = runner.invoke(cli, ["shims", "install"])
+    assert installed.exit_code == 0, installed.output
+    shim = (wrappers / "agent").read_text(encoding="utf-8")
+    assert f"real={target}" in shim
+
+    listed = runner.invoke(cli, ["shims", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert f"agent  {target}" in listed.output
+
+    check = runner.invoke(cli, ["shims", "check"])
+    assert check.exit_code == 0, check.output
+    assert "OK:" in check.output

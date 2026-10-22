@@ -113,8 +113,10 @@ executables: Table keyed by executable file name. A path key is matched by its
 file name only, so the same entry applies to a bare command or any absolute
 path to that file. When several keys share a file name, the first one wins.
 Each entry may contain a features list or table, a network table, an args list
-of extra arguments appended to the command, and/or a shim boolean (override
-the global shims toggle), applied when that executable is started.
+of extra arguments appended to the command, a shim boolean (override
+the global shims toggle), and/or path (an absolute executable to run
+instead of searching PATH for the section's file name). ``~`` in path is
+expanded when shims are installed.
 
 projects: List of tables (``[[projects]]``) with a mandatory path. The most
 specific path that covers the current working directory is active: that tree
@@ -212,6 +214,7 @@ non-empty data_root needs prune first.
   [executables.cursor-agent]
   features = ["cursor", "git", "ssh", "gui"]
   args = ["--force"]
+  # path = "/opt/cursor/cursor-agent"  # run this file instead of PATH lookup
 
 \b
   [executables.cursor-agent.network]
@@ -300,6 +303,7 @@ from buddelkiste.shims import (
     shim_dir_on_path,
     shim_env_path,
     shim_names_from_config,
+    shim_targets_from_config,
 )
 from buddelkiste.which import log_cmdline
 
@@ -813,7 +817,9 @@ def shims_group() -> None:
     own files without clobbering unrelated binaries of the same name.
     ``install --force`` replaces those binaries (and an unmanaged shell
     snippet). Directories are never replaced. ``check`` fails when install
-    would need ``--force`` for a shim or for the shell snippet.
+    would need ``--force`` for a shim or for the shell snippet. An entry's
+    ``path`` is an absolute executable the shim runs instead of searching
+    PATH for the section's file name.
     """
 
 
@@ -895,7 +901,12 @@ def shims_check(*, quiet: bool) -> None:
     config = load_config()
     decisions = shim_decisions_from_config(config)
     names = shim_names_from_config(config) if decisions else []
-    issues = check_shims(names, bin_dir=shim_dir(), env_path=shim_env_path())
+    issues = check_shims(
+        names,
+        bin_dir=shim_dir(),
+        env_path=shim_env_path(),
+        targets=shim_targets_from_config(config),
+    )
     if not issues:
         if not decisions:
             if not quiet:
@@ -918,12 +929,14 @@ def shims_check(*, quiet: bool) -> None:
 @shims_group.command("list")
 def shims_list() -> None:
     """Print each shim and the host binary it would run."""
-    names = list_shim_names(load_config())
+    config = load_config()
+    names = list_shim_names(config)
     if not names:
         click.echo("No shims.", err=True)
         return
     width = max(len(name) for name in names)
-    for entry in list_shims(names):
+    targets = shim_targets_from_config(config)
+    for entry in list_shims(names, targets=targets):
         target = str(entry.target) if entry.target is not None else "-"
         click.echo(f"{entry.name:<{width}}  {target}")
 

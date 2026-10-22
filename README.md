@@ -279,6 +279,11 @@ writes a small `sh` wrapper into `$XDG_DATA_HOME/buddelkiste/shims` (default
 without overwriting unrelated binaries. `bk shims install --force` replaces
 those regular files and symlinks; directories are left alone.
 
+Set `path` to an absolute executable when the program to run is not the
+section's file name on `PATH`. `~` is expanded at install time. The shim
+runs that file directly. `bk shims check` warns if it is missing or the
+installed shim still has the old target.
+
 Install also writes `$XDG_DATA_HOME/buddelkiste/shims.sh` and, if they
 already exist, appends a marked include to `~/.bashrc` and `~/.zshrc`. An
 existing `shims.sh` without the buddelkiste marker is left unchanged unless
@@ -295,6 +300,7 @@ next `install`.
 shims = true
 
 [executables.cursor-agent]
+path = "/opt/cursor/cursor-agent"
 features = ["cursor"]
 
 [executables.python]

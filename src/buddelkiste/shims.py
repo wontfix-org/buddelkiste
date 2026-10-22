@@ -91,23 +91,59 @@ def executable_shim_enabled(config: dict, entry: dict | None) -> bool:
     return global_shims_enabled(config)
 
 
+def _shim_rows(config: dict) -> list[tuple[str, str, dict | None, bool]]:
+    """Return ``(basename, config key, entry, enabled)`` with the first basename winning."""
+    executables = config.get("executables")
+    if not isinstance(executables, dict):
+        return []
+
+    rows: list[tuple[str, str, dict | None, bool]] = []
+    seen: set[str] = set()
+    for key, entry in executables.items():
+        name = Path(str(key)).name
+        if not name or name in {".", ".."} or name in seen:
+            continue
+        seen.add(name)
+        table = entry if isinstance(entry, dict) else None
+        rows.append((name, str(key), table, executable_shim_enabled(config, table)))
+    return rows
+
+
 def shim_decisions_from_config(config: dict) -> dict[str, bool]:
     """Map shim basenames to whether they should be installed.
 
     Duplicate basenames keep the first decision encountered.
     """
-    executables = config.get("executables")
-    if not isinstance(executables, dict):
-        return {}
+    return {name: enabled for name, _key, _entry, enabled in _shim_rows(config)}
 
-    decisions: dict[str, bool] = {}
-    for key, entry in executables.items():
-        name = Path(str(key)).name
-        if not name or name in {".", ".."} or name in decisions:
+
+def configured_executable_path(entry: dict | None, *, where: str) -> Path | None:
+    """Absolute ``path`` for an executable entry, if one is set.
+
+    ``~`` is expanded. A relative path is an error. The file does not have to
+    exist yet.
+    """
+    if not isinstance(entry, dict) or "path" not in entry:
+        return None
+    value = entry["path"]
+    if not isinstance(value, str) or not value.strip():
+        raise click.ClickException(f"{where} must be an absolute path")
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        raise click.ClickException(f"{where} must be an absolute path (got {value!r})")
+    return expanded
+
+
+def shim_targets_from_config(config: dict) -> dict[str, Path]:
+    """Absolute executable for each enabled shim basename that sets ``path``."""
+    targets: dict[str, Path] = {}
+    for name, key, entry, enabled in _shim_rows(config):
+        if not enabled:
             continue
-        table = entry if isinstance(entry, dict) else None
-        decisions[name] = executable_shim_enabled(config, table)
-    return decisions
+        path = configured_executable_path(entry, where=f"executables.{key}.path")
+        if path is not None:
+            targets[name] = path
+    return targets
 
 
 def shim_names_from_config(config: dict) -> list[str]:
@@ -115,8 +151,30 @@ def shim_names_from_config(config: dict) -> list[str]:
     return [name for name, enabled in shim_decisions_from_config(config).items() if enabled]
 
 
-def render_shim() -> str:
-    """Return the shell script body for a buddelkiste PATH shim."""
+def render_shim(target: Path | None = None) -> str:
+    """Return the shell script body for a buddelkiste PATH shim.
+
+    ``target``, when set, is the absolute executable to run. Otherwise the
+    script walks PATH for a binary with the shim's own file name.
+    """
+    if target is not None:
+        quoted = shlex.quote(str(target))
+        return f"""\
+#!/bin/sh
+{SHIM_MARKER}
+# Managed by buddelkiste (`bk shims install`). Do not edit.
+set -eu
+bk=$(command -v bk) || {{
+  printf '%s\\n' "buddelkiste: bk not found on PATH" >&2
+  exit 127
+}}
+real={quoted}
+if [ ! -f "$real" ] || [ ! -x "$real" ]; then
+  printf '%s\\n' "buddelkiste: $real is not an executable file" >&2
+  exit 127
+fi
+exec "$bk" run "$real" "$@"
+"""
     return f"""\
 #!/bin/sh
 {SHIM_MARKER}
@@ -291,12 +349,16 @@ def resolve_shim_target(
     *,
     bin_dir: Path | None = None,
     path_value: str | None = None,
+    configured: Path | None = None,
 ) -> Path | None:
-    """First executable named ``name`` on PATH outside the shim directory.
+    """Executable this shim would run.
 
-    Matches the PATH walk in :func:`render_shim` (skip the shim dir, require a
-    regular executable file).
+    ``configured`` is the entry's absolute ``path`` and wins over a PATH
+    search. Otherwise this is the first executable named ``name`` on PATH
+    outside the shim directory, matching :func:`render_shim`.
     """
+    if configured is not None:
+        return configured
     target_dir = bin_dir if bin_dir is not None else shim_dir()
     for directory in _path_entries(path_value):
         if _same_path(directory, target_dir):
@@ -374,13 +436,20 @@ def list_shims(
     *,
     bin_dir: Path | None = None,
     path_value: str | None = None,
+    targets: Mapping[str, Path] | None = None,
 ) -> list[ShimListing]:
     """Resolve the host binary each shim would exec."""
     target_dir = bin_dir if bin_dir is not None else shim_dir()
+    chosen = targets or {}
     return [
         ShimListing(
             name,
-            resolve_shim_target(name, bin_dir=target_dir, path_value=path_value),
+            resolve_shim_target(
+                name,
+                bin_dir=target_dir,
+                path_value=path_value,
+                configured=chosen.get(name),
+            ),
         )
         for name in names
     ]
@@ -425,18 +494,20 @@ def install_shims(
     bin_dir: Path | None = None,
     remove: list[str] | None = None,
     force: bool = False,
+    targets: Mapping[str, Path] | None = None,
 ) -> list[ShimInstallResult]:
     """Create or refresh shims for ``names`` under the application shim directory.
 
     Existing files that are not regular buddelkiste shims are left alone
     (``skipped``). ``force`` replaces a foreign regular file or symlink; it
     does not remove directories. Our own shims are rewritten when their
-    contents differ from the current template. Names in ``remove`` delete a
-    regular managed shim if present and never delete anything else.
+    contents differ from the current template. ``targets`` supplies an absolute
+    executable for a basename; other names search PATH. Names in ``remove``
+    delete a regular managed shim if present and never delete anything else.
     """
     target_dir = bin_dir if bin_dir is not None else shim_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    body = render_shim()
+    chosen = targets or {}
     results: list[ShimInstallResult] = []
 
     for name in remove or ():
@@ -454,6 +525,7 @@ def install_shims(
             results.append(ShimInstallResult(name, path, "skipped"))
             continue
 
+        body = render_shim(chosen.get(name))
         previous = path.read_text(encoding="utf-8") if claim == "update" else None
         if previous == body:
             results.append(ShimInstallResult(name, path, "unchanged"))
@@ -479,7 +551,13 @@ def install_shims_from_config(
     decisions = shim_decisions_from_config(config)
     enabled = [name for name, on in decisions.items() if on]
     disabled = [name for name, on in decisions.items() if not on]
-    return install_shims(enabled, bin_dir=bin_dir, remove=disabled, force=force)
+    return install_shims(
+        enabled,
+        bin_dir=bin_dir,
+        remove=disabled,
+        force=force,
+        targets=shim_targets_from_config(config),
+    )
 
 
 def install_shim_hook(
@@ -553,20 +631,33 @@ def _refusal_issue(name: str, path: Path, *, kind: str, refusal: str) -> ShimChe
     )
 
 
+def _installed_shim_text(path: Path) -> str | None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def check_shims(
     names: list[str],
     *,
     bin_dir: Path | None = None,
     path_value: str | None = None,
     env_path: Path | None = None,
+    targets: Mapping[str, Path] | None = None,
 ) -> list[ShimCheckIssue]:
     """Return issues where shims would miss PATH or install would need ``--force``.
 
     ``env_path``, when set, is the shell snippet. A foreign file there makes
     ``bk shims install`` refuse to write unless ``--force`` is passed.
+    ``targets`` are configured absolute executables. Each must be an
+    executable file, and an installed shim must already run that path.
     """
     target_dir = bin_dir if bin_dir is not None else shim_dir()
     path_dirs = _path_entries(path_value)
+    chosen = targets or {}
     issues: list[ShimCheckIssue] = []
 
     bin_on_path = shim_dir_on_path(bin_dir=target_dir, path_value=path_value)
@@ -585,6 +676,25 @@ def check_shims(
         if refusal is not None:
             issues.append(_refusal_issue(name, shim_path, kind="shim", refusal=refusal))
             continue
+
+        configured = chosen.get(name)
+        if configured is not None and not _is_executable(configured):
+            issues.append(
+                ShimCheckIssue(
+                    name,
+                    f"configured executable {configured} is not an executable file",
+                )
+            )
+        if configured is not None and _has_marker(shim_path, SHIM_MARKER_PREFIX):
+            current = _installed_shim_text(shim_path)
+            if current != render_shim(configured):
+                issues.append(
+                    ShimCheckIssue(
+                        name,
+                        f"shim at {shim_path} does not execute {configured}; "
+                        "run `bk shims install`",
+                    )
+                )
 
         first: Path | None = None
         for directory in path_dirs:
