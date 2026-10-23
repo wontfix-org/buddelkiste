@@ -510,6 +510,10 @@ def test_docker_policy_apply_and_mutex_cli(
         "buddelkiste.cli.get_binds",
         lambda config, enabled=None, **kwargs: [RWBindConfig(work)],
     )
+    monkeypatch.setattr(
+        "buddelkiste.cli.ensure_cwd_project",
+        lambda config, **kwargs: config,
+    )
     monkeypatch.setattr("buddelkiste.cli.run_bwrap", lambda *a, **k: 0)
     conflict = runner.invoke(
         cli,

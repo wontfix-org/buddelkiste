@@ -25,6 +25,10 @@ def prepared_cwd(
         "buddelkiste.cli.get_binds",
         lambda config, enabled=None, **kwargs: [RWBindConfig(tmp_path)],
     )
+    monkeypatch.setattr(
+        "buddelkiste.cli.ensure_cwd_project",
+        lambda config, **kwargs: config,
+    )
     return tmp_path
 
 
@@ -88,10 +92,10 @@ def test_cli_forwards_help_to_command(
     fake_bwrap,
 ) -> None:
     result = CliRunner().invoke(
-        cli, ["run", "--no-feature", "ssh", "cursor-agent", "--help"]
+        cli, ["run", "--no-feature", "ssh", "/bin/echo", "--help"]
     )
     assert result.exit_code == 0, result.output
-    assert fake_bwrap["args"][-3:] == ["--", "cursor-agent", "--help"]
+    assert fake_bwrap["args"][-3:] == ["--", "/bin/echo", "--help"]
     assert "Run a command inside a bubblewrap sandbox" not in result.output
 
 

@@ -42,9 +42,8 @@ def test_ro_config_bind_not_writable(
     config.write_text(
         "features = []\n"
         "\n"
-        "[[binds]]\n"
-        f'source = "{integ_workspace["work"]}"\n'
-        'mode = "rw"\n'
+        "[[projects]]\n"
+        f'path = "{integ_workspace["work"]}"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{ro_dir}"\n'
@@ -154,9 +153,8 @@ def test_custom_target_mount(
     config.write_text(
         "features = []\n"
         "\n"
-        "[[binds]]\n"
-        f'source = "{integ_workspace["work"]}"\n'
-        'mode = "rw"\n'
+        "[[projects]]\n"
+        f'path = "{integ_workspace["work"]}"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{src}"\n'
@@ -189,9 +187,8 @@ def test_tmp_overlay_writable_without_host_mutation(
     config.write_text(
         "features = []\n"
         "\n"
-        "[[binds]]\n"
-        f'source = "{integ_workspace["work"]}"\n'
-        'mode = "rw"\n'
+        "[[projects]]\n"
+        f'path = "{integ_workspace["work"]}"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{lower}"\n'
@@ -228,9 +225,8 @@ def test_persistent_overlay_writes_to_upper(
     config.write_text(
         "features = []\n"
         "\n"
-        "[[binds]]\n"
-        f'source = "{integ_workspace["work"]}"\n'
-        'mode = "rw"\n'
+        "[[projects]]\n"
+        f'path = "{integ_workspace["work"]}"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{lower}"\n'

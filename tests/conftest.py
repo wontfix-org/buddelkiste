@@ -55,9 +55,8 @@ def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     config.write_text(
         "features = []\n"
         "\n"
-        "[[binds]]\n"
-        f'source = "{work}"\n'
-        'mode = "rw"\n',
+        "[[projects]]\n"
+        f'path = "{work}"\n',
         encoding="utf-8",
     )
 

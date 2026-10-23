@@ -262,10 +262,12 @@ A `glob` table binds every matching file or directory with the same `mode`.
 With `glob`, an optional `target` is a directory and each match is mounted at
 `target/<basename>`.
 
-The current working directory must be visible inside the sandbox. If it is not
-covered by any bind, `bk` asks **yes** (this run), **always** (persist a
-`[[projects]]` entry), or **no** (abort), then which features to enable. A
-project is always bound read-write. Non-interactively it errors instead.
+The current working directory must be a configured project: the working
+directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`
+entry that happens to cover cwd is not enough. If no project covers cwd,
+`bk` asks **yes** (this run), **always** (persist a `[[projects]]` entry),
+or **no** (abort), then which features to enable. A project is always
+bound read-write. Non-interactively it errors instead.
 
 ```toml
 [[projects]]

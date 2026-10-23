@@ -268,10 +268,12 @@ needs prune first.
 
 # Working directory
 
-The current working directory must be visible inside the sandbox. If it is not
-covered by any bind, the script asks yes (this run), always (persist a
-[[projects]] entry), or no (abort), then which features to enable.
-Non-interactively it exits with an error instead.
+The current working directory must be a configured project: the working
+directory itself or a subdirectory of a [[projects]] path. A [[binds]] entry
+that happens to cover cwd is not enough. If no project covers cwd, the
+script asks yes (this run), always (persist a [[projects]] entry), or no
+(abort), then which features to enable. Non-interactively it exits with an
+error instead.
 """
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
@@ -495,12 +497,7 @@ def run(
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     command = append_executable_args(command, config, executable)
-    config = ensure_cwd_project(
-        config,
-        executable=executable,
-        enable=enable_features,
-        disable=disable_features,
-    )
+    config = ensure_cwd_project(config)
     enabled = resolve_features(
         config,
         executable=executable,
@@ -1448,41 +1445,30 @@ def is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 
-def cwd_is_covered(binds: list, cwd: Path | None = None) -> bool:
-    here = cwd if cwd is not None else Path.cwd()
-    return any(hasattr(bind, "covers_path") and bind.covers_path(here) for bind in binds)
-
-
 def ensure_cwd_project(
     config: dict,
     *,
-    executable: str | None = None,
-    enable: Sequence[str] = (),
-    disable: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> dict:
-    """Ensure the working directory is a project (or already covered).
+    """Ensure the working directory is under a ``[[projects]]`` entry.
 
-    If nothing covers cwd, interactively offer yes (this run), always (persist
+    A ``[[binds]]`` mount that happens to cover cwd does not count. If no
+    project covers cwd, interactively offer yes (this run), always (persist
     a ``[[projects]]`` entry), or no (abort), then which features to enable.
     """
     here = (cwd if cwd is not None else Path.cwd()).resolve()
-    enabled = resolve_features(
-        config, executable=executable, enable=enable, disable=disable, cwd=here
-    )
-    binds = get_binds(config, enabled, cwd=here)
-    if cwd_is_covered(binds, here):
+    if lookup_project_config(config, cwd=here) is not None:
         return config
 
     if not is_interactive():
         raise click.ClickException(
-            f"The current directory {here} is not available inside the sandbox.\n"
+            f"The current directory {here} is not under a configured project.\n"
         )
 
     from buddelkiste.prompts import prompt_cwd_access, prompt_project_features
 
     click.echo(
-        f"The current directory {here} is not available inside the sandbox.",
+        f"The current directory {here} is not under a configured project.",
         err=True,
     )
     choice = prompt_cwd_access()
@@ -1655,7 +1641,6 @@ __all__ = [
     "bind_config",
     "cli",
     "config_show",
-    "cwd_is_covered",
     "effective_config",
     "ensure_cwd_project",
     "find_sandbox_ssh_key",

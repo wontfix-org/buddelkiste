@@ -228,6 +228,10 @@ def test_cli_dbus_proxy_flags_reach_the_proxy(
         "buddelkiste.cli.get_binds",
         lambda config, enabled=None, **kwargs: [RWBindConfig(tmp_path)],
     )
+    monkeypatch.setattr(
+        "buddelkiste.cli.ensure_cwd_project",
+        lambda config, **kwargs: config,
+    )
     monkeypatch.setattr("buddelkiste.cli.run_bwrap", lambda bwrap_args, net: 0)
     monkeypatch.setattr(
         "buddelkiste.features.which",
@@ -302,6 +306,10 @@ def test_cli_dbus_proxy_rejects_invalid_name(
     monkeypatch.setattr(
         "buddelkiste.cli.get_binds",
         lambda config, enabled=None, **kwargs: [RWBindConfig(tmp_path)],
+    )
+    monkeypatch.setattr(
+        "buddelkiste.cli.ensure_cwd_project",
+        lambda config, **kwargs: config,
     )
     monkeypatch.setattr("buddelkiste.cli.run_bwrap", lambda bwrap_args, net: 0)
     monkeypatch.setattr(

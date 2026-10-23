@@ -311,6 +311,31 @@ def test_ensure_cwd_covered_by_project_is_noop(
     assert result == config
 
 
+def test_ensure_cwd_covered_by_project_subdir_is_noop(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = tmp_path / "src"
+    child.mkdir()
+    monkeypatch.chdir(child)
+    config = {"projects": [{"path": str(tmp_path)}]}
+    result = ensure_cwd_project(config)
+    assert result == config
+
+
+def test_ensure_cwd_bind_does_not_cover(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
+    config = {"binds": [{"source": str(tmp_path), "mode": "rw"}]}
+    with pytest.raises(click.ClickException, match="not under a configured project"):
+        ensure_cwd_project(config)
+
+
 def test_ensure_cwd_noninteractive_errors(
     tmp_path: Path,
     runtime_dir: Path,
@@ -318,7 +343,7 @@ def test_ensure_cwd_noninteractive_errors(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
-    with pytest.raises(click.ClickException, match="not available inside the sandbox"):
+    with pytest.raises(click.ClickException, match="not under a configured project"):
         ensure_cwd_project({})
 
 
