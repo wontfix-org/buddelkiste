@@ -67,6 +67,7 @@ def test_cli_runs_bwrap_with_command(
     ]
     assert args[-3:] == ["--", "/bin/echo", "hello"]
     assert fake_bwrap["nets"][0].mode == "filter"
+    assert fake_bwrap["nets"][0].backend == "pasta"
     assert "10.0.0.0/8" in fake_bwrap["nets"][0].deny
     assert "127.0.0.0/8" in fake_bwrap["nets"][0].deny
     assert "SSH_AUTH_SOCK" not in fake_bwrap["args"]
@@ -124,6 +125,7 @@ def test_cli_info_defaults(tmp_config: Path, tmp_path: Path, monkeypatch: pytest
     assert "  - user\n" in result.output
     assert "  - python\n" not in result.output
     assert "  mode: filter" in result.output
+    assert "  backend: pasta" in result.output
     with pytest.raises(tomllib.TOMLDecodeError):
         tomllib.loads(result.output)
 
@@ -191,6 +193,7 @@ def test_cli_config_show_defaults(
     assert data["features"]["user"] is True
     assert data["features"]["python"] is False
     assert data["network"]["mode"] == "filter"
+    assert data["network"]["backend"] == "pasta"
     assert data["shims"] is True
     assert f"config: {tmp_config}" in result.output
     assert f"cwd: {tmp_path.resolve()}" in result.output
@@ -346,11 +349,42 @@ def test_cli_network_filter_flags(
     net = fake_bwrap["nets"][0]
     assert isinstance(net, NetworkConfig)
     assert net.mode == "filter"
+    assert net.backend == "pasta"
     assert net.policy == "deny"
     assert net.allow == ["1.1.1.1/32"]
     assert "169.254.169.254/32" in net.deny
     assert "10.0.0.0/8" in net.deny  # default internal preset
     assert "127.0.0.0/8" in net.deny  # default localhost preset
+
+
+def test_cli_net_backend_from_config(
+    prepared_cwd: Path, tmp_config: Path, fake_bwrap
+) -> None:
+    tmp_config.write_text(
+        '[network]\nbackend = "slirp4netns"\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cli, ["run", "--no-feature", "ssh", "/bin/true"]
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_bwrap["nets"][0].backend == "slirp4netns"
+
+
+def test_cli_net_backend_flag(prepared_cwd: Path, fake_bwrap) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--no-feature",
+            "ssh",
+            "--net-backend",
+            "slirp",
+            "/bin/true",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_bwrap["nets"][0].backend == "slirp4netns"
 
 
 def test_cli_net_allow_implies_filter(prepared_cwd: Path, fake_bwrap) -> None:

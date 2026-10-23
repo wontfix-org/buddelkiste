@@ -124,6 +124,9 @@ def _pasta_debug_launch(tmp_path: Path) -> tuple[list[str], str, bool]:
 
 NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
+NETWORK_BACKENDS = ("pasta", "slirp4netns")
+NETWORK_BACKEND_ALIASES = {"slirp": "slirp4netns"}
+DEFAULT_NET_BACKEND = "pasta"
 
 # Named deny helpers expanded into concrete CIDRs at resolve time.
 _PRIVATE_CIDRS = (
@@ -153,10 +156,33 @@ DENY_PRESETS: dict[str, tuple[str, ...]] = {
 # Default filter deny list: internal (RFC1918/ULA) and loopback.
 DEFAULT_DENY_PRESETS: tuple[str, ...] = ("internal", "localhost")
 
+# When set to pasta or slirp4netns, filter mode uses that backend if config
+# and --net-backend do not pick one.
+NET_HELPER_ENV = "BUDDELKISTE_NET_HELPER"
+
+
+def normalize_net_backend(raw: object, *, where: str) -> str:
+    """Return pasta or slirp4netns; ``slirp`` is an alias for slirp4netns."""
+    value = str(raw).strip().lower()
+    value = NETWORK_BACKEND_ALIASES.get(value, value)
+    if value not in NETWORK_BACKENDS:
+        allowed = ", ".join((*NETWORK_BACKENDS, *NETWORK_BACKEND_ALIASES))
+        raise click.ClickException(f"Invalid {where}: {raw!r} (expected {allowed})")
+    return value
+
+
+def default_net_backend() -> str:
+    """Pasta, unless ``BUDDELKISTE_NET_HELPER`` pins slirp4netns or pasta."""
+    forced = os.environ.get(NET_HELPER_ENV)
+    if not forced:
+        return DEFAULT_NET_BACKEND
+    return normalize_net_backend(forced, where=NET_HELPER_ENV)
+
 
 @dataclass
 class NetworkConfig:
     mode: str = "filter"
+    backend: str = DEFAULT_NET_BACKEND
     policy: str = "allow"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
@@ -197,6 +223,7 @@ class NetworkConfig:
         deny_hosts = list(dict.fromkeys([*deny_hosts, *self.deny_hosts]))
         return NetworkConfig(
             mode=self.mode,
+            backend=normalize_net_backend(self.backend, where="network.backend"),
             policy=self.policy,
             allow=allow_cidrs,
             deny=deny_cidrs,
@@ -345,6 +372,13 @@ def parse_network_table(
             f"Invalid network.mode {where}: {mode!r} (expected {', '.join(NETWORK_MODES)})"
         )
 
+    if "backend" in data:
+        backend = normalize_net_backend(
+            data["backend"], where=f"network.backend {where}"
+        )
+    else:
+        backend = default_net_backend()
+
     policy = data.get("policy", "allow")
     if policy not in NETWORK_POLICIES:
         raise click.ClickException(
@@ -372,6 +406,7 @@ def parse_network_table(
 
     cfg = NetworkConfig(
         mode=mode,
+        backend=backend,
         policy=policy,
         allow=[str(x) for x in allow],
         deny=[str(x) for x in deny],
@@ -408,6 +443,7 @@ def resolve_network(
     *,
     executable: str | None = None,
     mode: str | None = None,
+    backend: str | None = None,
     policy: str | None = None,
     allow: Sequence[str] = (),
     deny: Sequence[str] = (),
@@ -419,7 +455,7 @@ def resolve_network(
     Precedence: defaults → global [network] → per-executable network → CLI flags.
     CLI ``--net-allow`` / ``--net-deny`` / ``--net-allow-preset`` /
     ``--net-deny-preset`` append to the lists; ``--network`` / ``--net-policy``
-    override mode/policy when given.
+    / ``--net-backend`` override mode/policy/backend when given.
 
     Filter mode is selected automatically when filtering options are used, unless
     ``--network`` (or an explicit config ``mode``) chooses another mode.
@@ -431,7 +467,7 @@ def resolve_network(
     registry = load_deny_preset_registry(config)
     network_table = _effective_network_table(config, executable)
     mode_from_config = bool(network_table and "mode" in network_table)
-    net = NetworkConfig()
+    net = NetworkConfig(backend=default_net_backend())
     if "network" in config:
         net = parse_network_table(config["network"], where="in config", registry=registry)
 
@@ -449,6 +485,9 @@ def resolve_network(
                 f"Invalid --network mode: {mode!r} (expected {', '.join(NETWORK_MODES)})"
             )
         net.mode = mode
+
+    if backend is not None:
+        net.backend = normalize_net_backend(backend, where="--net-backend")
 
     if policy is not None:
         if policy not in NETWORK_POLICIES:
@@ -751,46 +790,31 @@ def build_nft_ruleset(
     return "\n".join(lines) + "\n"
 
 
-# When set to pasta or slirp4netns, filter mode uses that backend.
-NET_HELPER_ENV = "BUDDELKISTE_NET_HELPER"
-_NET_HELPERS = ("pasta", "slirp4netns")
+def find_net_helper(backend: str | None = None) -> tuple[str, str]:
+    """Return ``(kind, path)`` for the configured userspace helper.
 
-
-def find_net_helper() -> tuple[str, str]:
-    """Return (kind, path) for pasta or slirp4netns.
-
-    ``BUDDELKISTE_NET_HELPER`` picks one when both are installed. Unset, pasta
-    wins and slirp4netns is the fallback.
+    ``backend`` is pasta or slirp4netns (``slirp`` is accepted). When omitted,
+    ``BUDDELKISTE_NET_HELPER`` or the pasta default is used. The other helper
+    is not tried if the chosen one is missing.
     """
-    forced = os.environ.get(NET_HELPER_ENV)
-    if forced:
-        if forced not in _NET_HELPERS:
-            raise click.ClickException(
-                f"{NET_HELPER_ENV} must be pasta or slirp4netns (got {forced!r})"
-            )
-        path = which(forced)
-        if not path:
-            raise click.ClickException(
-                f"{NET_HELPER_ENV}={forced} but {forced} is not on PATH"
-            )
-        return forced, path
-    pasta = which("pasta")
-    if pasta:
-        return "pasta", pasta
-    slirp = which("slirp4netns")
-    if slirp:
-        return "slirp4netns", slirp
-    raise click.ClickException(
-        "network.mode=filter requires pasta (passt) or slirp4netns on PATH"
-    )
+    if backend is None:
+        kind = default_net_backend()
+        where = NET_HELPER_ENV if os.environ.get(NET_HELPER_ENV) else "network.backend"
+    else:
+        kind = normalize_net_backend(backend, where="network.backend")
+        where = "network.backend"
+    path = which(kind)
+    if not path:
+        raise click.ClickException(f"{where}={kind} requires {kind} on PATH")
+    return kind, path
 
 
-def ensure_filter_tools() -> None:
+def ensure_filter_tools(backend: str | None = None) -> None:
     if not which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
     if not which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
-    find_net_helper()
+    find_net_helper(backend)
 
 
 def with_share_net(bwrap_args: list[str]) -> list[str]:
@@ -1139,8 +1163,8 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
         return subprocess.run(bwrap_args, check=False).returncode
 
     # filter
-    ensure_filter_tools()
-    kind, helper = find_net_helper()
+    ensure_filter_tools(net.backend)
+    kind, helper = find_net_helper(net.backend)
 
     with tempfile.TemporaryDirectory(prefix="buddelkiste-net-") as tmp:
         tmp_path = Path(tmp)

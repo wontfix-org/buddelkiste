@@ -35,6 +35,7 @@ bk run --feature cursor --feature gui cursor-agent
 bk run --network host …                 # share host network
 bk run --network none …                 # no connectivity
 bk run --network filter \
+  --net-backend pasta \
   --net-policy deny \
   --net-allow 1.1.1.1/32 \
   --net-allow api.github.com \
@@ -43,7 +44,7 @@ bk run --network filter \
 ```
 
 `bk run` wrapper options: `--debug`, `--debug-file`, `--feature` / `--no-feature`,
-`--network`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
+`--network`, `--network-backend`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
 `--net-deny`, `--net-deny-preset`,
 `--dbus-see`, `--dbus-talk`, `--dbus-own`, `--dbus-call`, `--dbus-broadcast`.
 Everything else is the sandboxed command. `--debug` logs to stderr.
@@ -200,6 +201,7 @@ images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
 # [docker_instance]
 # fs = "project"       # host | project | data
 # net = "userspace"    # host | userspace | none
+# net_backend = "slirp4netns"  # or pasta / slirp
 # # data_root = "$XDG_DATA_HOME/buddelkiste/docker-instance/myproj"
 # # fs_allow = ["$HOME/.cache/go-build"]
 # # [docker_instance.policy]
@@ -230,9 +232,10 @@ name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
 
 [network]
-# Defaults: mode = "filter", policy = "allow",
+# Defaults: mode = "filter", backend = "pasta", policy = "allow",
 # deny_presets = ["internal", "localhost"] (RFC1918/ULA + loopback).
 mode = "filter"
+backend = "pasta"  # or slirp4netns (alias: slirp)
 policy = "allow"
 allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
 deny = ["203.0.113.0/24"]
@@ -529,8 +532,9 @@ mode `000`; `bk docker-instance prune` (and teardown wipe) chmod them so they
 can be deleted.
 
 Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
-`/etc/subgid` entries for your user; for `net = "userspace"` also `pasta`
-(passt) or `slirp4netns`. Storage defaults to whatever dockerd picks (`auto`);
+`/etc/subgid` entries for your user; for `net = "userspace"` the configured
+`net_backend` (`slirp4netns` by default, or `pasta`). Storage defaults to
+whatever dockerd picks (`auto`);
 set `storage_driver` (or `--docker-instance-storage-driver`) to `overlay2`,
 `fuse-overlayfs`, or `vfs`. Do not switch drivers on a non-empty `data_root`
 without pruning first.
@@ -549,6 +553,7 @@ features = { docker = false, docker-instance = true }
 [docker_instance]
 fs = "project"          # host | project | data — daemon mount namespace
 net = "userspace"       # host | userspace | none
+# net_backend = "slirp4netns"  # or pasta / slirp; no fallback
 # data_root = "/path/to/store"
 # fs_allow = ["$HOME/.cache/go-build"]
 proxy = true            # agent sees only the filtered proxy socket
@@ -570,7 +575,7 @@ proxy = true            # agent sees only the filtered proxy socket
 
 | `net` | Behaviour |
 |-------|-----------|
-| `userspace` (default) | rootlesskit pasta/slirp4netns; dockerd iptables+forward on so bridge containers can use DNS/egress |
+| `userspace` (default) | rootlesskit via `net_backend` (slirp4netns default, or pasta); dockerd iptables+forward on so bridge containers can use DNS/egress |
 | `host` | Share host network with the daemon helper |
 | `none` | No network for the daemon helper |
 
@@ -583,8 +588,10 @@ this private store. BuildKit via the Docker CLI also needs a working
 
 ## Network filter dependencies
 
-`network.mode = "filter"` needs **pasta** (from `passt`) or **slirp4netns**, plus
-**nft** and **setpriv**. No root and no reserved host subnets are required.
+`network.mode = "filter"` needs the configured **`network.backend`** helper
+(**pasta** from `passt` by default, or **slirp4netns**), plus **nft** and
+**setpriv**. The other helper is not tried. No root and no reserved host
+subnets are required.
 Hostname rules start a DNS proxy that redirects UDP/53 and updates dynamic
 nftables allow sets from resolved A/AAAA records. Default policy is `allow`:
 public egress is accepted, and the `internal` and `localhost` deny presets

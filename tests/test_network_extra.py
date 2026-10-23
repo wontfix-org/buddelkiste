@@ -59,6 +59,8 @@ def test_parse_network_table_validation() -> None:
         parse_network_table({"deny_presets": "private"}, where="in config")
     with pytest.raises(click.ClickException, match="allow_presets"):
         parse_network_table({"allow_presets": "metadata"}, where="in config")
+    with pytest.raises(click.ClickException, match="network.backend"):
+        parse_network_table({"backend": "wireguard"}, where="in config")
 
 
 def test_resolve_network_rejects_bad_cli_flags() -> None:
@@ -166,10 +168,13 @@ def test_find_net_helper_and_ensure_tools(monkeypatch: pytest.MonkeyPatch) -> No
         "buddelkiste.network.which",
         lambda name: {"slirp4netns": "/bin/slirp"}.get(name),
     )
-    assert find_net_helper() == ("slirp4netns", "/bin/slirp")
+    assert find_net_helper("slirp4netns") == ("slirp4netns", "/bin/slirp")
+    assert find_net_helper("slirp") == ("slirp4netns", "/bin/slirp")
+    with pytest.raises(click.ClickException, match="network.backend=pasta"):
+        find_net_helper()
 
     monkeypatch.setattr("buddelkiste.network.which", lambda name: None)
-    with pytest.raises(click.ClickException, match="pasta|slirp4netns"):
+    with pytest.raises(click.ClickException, match="pasta"):
         find_net_helper()
 
     monkeypatch.setattr(
@@ -198,13 +203,18 @@ def test_find_net_helper_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "pasta")
     assert find_net_helper() == ("pasta", "/bin/pasta")
 
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    assert find_net_helper() == ("pasta", "/bin/pasta")
+
     monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "nope")
     with pytest.raises(click.ClickException, match="BUDDELKISTE_NET_HELPER"):
         find_net_helper()
+    with pytest.raises(click.ClickException, match="network.backend"):
+        find_net_helper("wireguard")
 
     monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "slirp4netns")
     monkeypatch.setattr("buddelkiste.network.which", lambda name: None)
-    with pytest.raises(click.ClickException, match="not on PATH"):
+    with pytest.raises(click.ClickException, match="requires slirp4netns on PATH"):
         find_net_helper()
 
 
@@ -559,7 +569,7 @@ def test_run_bwrap_filter_slirp_branch(
     with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
         code = run_bwrap(
             ["bwrap", "--unshare-all", "--", "true"],
-            NetworkConfig(mode="filter"),
+            NetworkConfig(mode="filter", backend="slirp4netns"),
         )
     assert code == 3
     assert "Running unshare:" in caplog.text
@@ -581,4 +591,7 @@ def test_run_bwrap_filter_slirp_branch(
         }.get(name),
     )
     with pytest.raises(click.ClickException, match="requires unshare"):
-        run_bwrap(["bwrap", "--unshare-all", "--", "true"], NetworkConfig(mode="filter"))
+        run_bwrap(
+            ["bwrap", "--unshare-all", "--", "true"],
+            NetworkConfig(mode="filter", backend="slirp4netns"),
+        )

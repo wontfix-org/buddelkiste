@@ -114,6 +114,7 @@ def test_effective_config_applies_layers(tmp_path: Path) -> None:
     assert merged["features"]["rust"] is True
     assert merged["features"]["ssh"] is False
     assert merged["network"]["mode"] == "none"
+    assert merged["network"]["backend"] == "pasta"
     assert merged["dbus_proxy"]["talk"] == ["org.foo.Bar"]
     assert merged["binds"] == [{"source": "/tmp", "mode": "ro"}]
     assert "executables" not in merged

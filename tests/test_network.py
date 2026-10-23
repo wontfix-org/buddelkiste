@@ -69,6 +69,7 @@ def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
 def test_resolve_network_defaults() -> None:
     net = resolve_network({})
     assert net.mode == "filter"
+    assert net.backend == "pasta"
     assert net.policy == "allow"
     assert net.allow == []
     assert "10.0.0.0/8" in net.deny
@@ -100,6 +101,29 @@ def test_resolve_network_implies_filter_from_config_without_mode() -> None:
     policy_only = resolve_network({"network": {"policy": "allow"}})
     assert policy_only.mode == "filter"
     assert policy_only.policy == "allow"
+
+
+def test_resolve_network_backend_config_and_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
+    assert resolve_network({}).backend == "pasta"
+    assert resolve_network({"network": {"backend": "slirp4netns"}}).backend == (
+        "slirp4netns"
+    )
+    assert resolve_network({"network": {"backend": "slirp"}}).backend == "slirp4netns"
+    assert resolve_network({}, backend="slirp4netns").backend == "slirp4netns"
+    assert resolve_network(
+        {"network": {"backend": "pasta"}},
+        backend="slirp",
+    ).backend == "slirp4netns"
+    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "slirp4netns")
+    assert resolve_network({}).backend == "slirp4netns"
+    assert resolve_network({"network": {"backend": "pasta"}}).backend == "pasta"
+    with pytest.raises(click.ClickException, match="network.backend"):
+        resolve_network({"network": {"backend": "wireguard"}})
+    with pytest.raises(click.ClickException, match="--net-backend"):
+        resolve_network({}, backend="wireguard")
 
 
 def test_resolve_network_explicit_mode_wins() -> None:
@@ -365,7 +389,7 @@ def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> No
         }.get(name)
 
     monkeypatch.setattr("buddelkiste.network.which", which)
-    with pytest.raises(click.ClickException, match="pasta|slirp4netns"):
+    with pytest.raises(click.ClickException, match="pasta"):
         run_bwrap(["bwrap", "--unshare-all", "--", "true"], NetworkConfig(mode="filter"))
 
 

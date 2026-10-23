@@ -34,6 +34,7 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
+from buddelkiste.network import normalize_net_backend
 from buddelkiste.which import log_cmdline, path_with_tools, which
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ def daemon_tool_path(base: str | None = None) -> str:
 
 FS_MODES = frozenset({"host", "project", "data"})
 NET_MODES = frozenset({"host", "userspace", "none"})
+DEFAULT_NET_BACKEND = "slirp4netns"
 STORAGE_DRIVERS = frozenset({"auto", "overlay2", "fuse-overlayfs", "vfs"})
 
 # Instance defaults: allow build + BuildKit /session; deny other high-risk APIs.
@@ -89,6 +91,7 @@ class DockerInstanceConfig:
     fs: str = "project"
     fs_allow: tuple[str, ...] = ()
     net: str = "userspace"
+    net_backend: str = DEFAULT_NET_BACKEND
     proxy: bool = True
     remove_data_on_teardown: bool = False
     storage_driver: str = "auto"
@@ -126,6 +129,10 @@ def _apply_cli_overrides(cfg: DockerInstanceConfig) -> DockerInstanceConfig:
     if "storage_driver" in raw:
         updates["storage_driver"] = parse_storage_driver(
             raw["storage_driver"], where="--docker-instance-storage-driver"
+        )
+    if "net_backend" in raw:
+        updates["net_backend"] = normalize_net_backend(
+            raw["net_backend"], where="--docker-instance-net-backend"
         )
     return replace(cfg, **updates) if updates else cfg
 
@@ -353,6 +360,10 @@ def config_from_mapping(
         raise click.ClickException(
             f"{where}.net must be one of {sorted(NET_MODES)} (got {net!r})"
         )
+    net_backend = normalize_net_backend(
+        data.get("net_backend", DEFAULT_NET_BACKEND),
+        where=f"{where}.net_backend",
+    )
 
     fs_allow_raw = data.get("fs_allow", [])
     if not isinstance(fs_allow_raw, list):
@@ -383,6 +394,7 @@ def config_from_mapping(
         "fs",
         "fs_allow",
         "net",
+        "net_backend",
         "proxy",
         "remove_data_on_teardown",
         "storage_driver",
@@ -397,6 +409,7 @@ def config_from_mapping(
         fs=fs,
         fs_allow=fs_allow,
         net=net,
+        net_backend=net_backend,
         proxy=proxy,
         remove_data_on_teardown=remove_data_on_teardown,
         storage_driver=storage_driver,
@@ -473,7 +486,9 @@ def expand_fs_allow(paths: Sequence[str]) -> list[Path]:
     return result
 
 
-def rootlesskit_net_args(net: str) -> list[str]:
+def rootlesskit_net_args(
+    net: str, backend: str = DEFAULT_NET_BACKEND
+) -> list[str]:
     """Map ``net`` mode to rootlesskit ``--net=…`` and related flags."""
     # Always copy-up /etc and /run so dockerd can create /run/docker (plugins).
     common = [
@@ -487,14 +502,13 @@ def rootlesskit_net_args(net: str) -> list[str]:
         return ["--net=host", *common]
     if net == "none":
         return ["--net=none", *common]
-    # Prefer slirp4netns (stable); pasta is still experimental in some releases.
-    if which("slirp4netns"):
-        return ["--net=slirp4netns", *common]
-    if which("pasta"):
-        return ["--net=pasta", *common]
-    raise click.ClickException(
-        "docker-instance net=userspace needs slirp4netns or pasta (passt)"
-    )
+    kind = normalize_net_backend(backend, where="docker_instance.net_backend")
+    path = which(kind)
+    if not path:
+        raise click.ClickException(
+            f"docker-instance net=userspace needs {kind} on PATH"
+        )
+    return [f"--net={kind}", *common]
 
 
 def host_dns_servers(resolv: Path | None = None) -> list[str]:
@@ -623,6 +637,7 @@ def build_dockerd_command(
     runtime_dir: Path,
     fs_allow: Sequence[Path],
     storage_driver: str = "auto",
+    net_backend: str = DEFAULT_NET_BACKEND,
 ) -> list[str]:
     """Full argv to launch rootless dockerd (optional bwrap + rootlesskit)."""
     data_root.mkdir(parents=True, exist_ok=True)
@@ -679,7 +694,7 @@ def build_dockerd_command(
     return [
         "rootlesskit",
         f"--state-dir={exec_root / 'rootlesskit'}",
-        *rootlesskit_net_args(net),
+        *rootlesskit_net_args(net, net_backend),
         *inner,
     ]
 
@@ -834,6 +849,7 @@ def docker_instance_setup(
         pidfile=pidfile,
         sock=daemon_sock,
         net=cfg.net,
+        net_backend=cfg.net_backend,
         fs=cfg.fs,
         project=project,
         runtime_dir=short_base,
