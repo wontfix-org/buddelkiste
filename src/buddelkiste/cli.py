@@ -272,8 +272,9 @@ The current working directory must be a configured project: the working
 directory itself or a subdirectory of a [[projects]] path. A [[binds]] entry
 that happens to cover cwd is not enough. If no project covers cwd, the
 script asks yes (this run), always (persist a [[projects]] entry), or no
-(abort), then which features to enable. Non-interactively it exits with an
-error instead.
+(abort), then which features to enable. Both prompts are Rich lists (arrow
+keys, enter; space toggles features, typing filters them). Non-interactively
+it exits with an error instead.
 """
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args

@@ -266,8 +266,9 @@ The current working directory must be a configured project: the working
 directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`
 entry that happens to cover cwd is not enough. If no project covers cwd,
 `bk` asks **yes** (this run), **always** (persist a `[[projects]]` entry),
-or **no** (abort), then which features to enable. A project is always
-bound read-write. Non-interactively it errors instead.
+or **no** (abort), then which features to enable. Both prompts are Rich
+lists (arrow keys, enter; space toggles features, typing filters them).
+A project is always bound read-write. Non-interactively it errors instead.
 
 ```toml
 [[projects]]

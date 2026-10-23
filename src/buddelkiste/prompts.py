@@ -1,23 +1,39 @@
-"""Interactive prompts for project registration (Rich, no alternate screen)."""
+"""Interactive prompts for project registration (BeauPy on Rich)."""
 
 from __future__ import annotations
 
+from beaupy import Config, select, select_multiple
 from rich.console import Console
-from rich.prompt import Prompt
 
 from buddelkiste.features import feature_names, load_feature_registry
+
+_ACCESS_CHOICES: tuple[tuple[str, str], ...] = (
+    ("yes", "this run only"),
+    ("always", "persist as a [[projects]] entry"),
+    ("no", "abort"),
+)
+_ACCESS_NAMES = [name for name, _ in _ACCESS_CHOICES]
+_ACCESS_LABELS = dict(_ACCESS_CHOICES)
+
+
+def _config(console: Console | None) -> Config:
+    cons = console or Console(stderr=True, highlight=False)
+    return Config(console=cons)
 
 
 def prompt_cwd_access(*, console: Console | None = None) -> str:
     """Ask whether to add the cwd as a project: yes, no, or always."""
-    cons = console or Console(stderr=True)
-    return Prompt.ask(
-        "Add it as a project for this run [yes], persist it [always], or abort [no]?",
-        choices=["yes", "no", "always"],
-        default="no",
-        console=cons,
-        show_choices=True,
+    width = max(len(name) for name in _ACCESS_NAMES)
+    choice = select(
+        _ACCESS_NAMES,
+        preprocessor=lambda name: f"{name:<{width}}  [dim]{_ACCESS_LABELS[name]}[/dim]",
+        cursor="❯",
+        cursor_style="cyan",
+        cursor_index=_ACCESS_NAMES.index("no"),
+        title="Add it as a project for this run, persist it, or abort?",
+        config=_config(console),
     )
+    return "no" if choice is None else choice
 
 
 def prompt_project_features(
@@ -25,30 +41,22 @@ def prompt_project_features(
     *,
     console: Console | None = None,
 ) -> dict[str, bool]:
-    """Ask which features to enable for a new project.
-
-    Prints a compact name/description list and reads one line of space- or
-    comma-separated names. Empty input enables nothing extra.
-    """
-    cons = console or Console(stderr=True)
+    """Ask which extra features to enable for a new project."""
     registry = load_feature_registry(config)
     names = [name for name in feature_names(registry) if name != "user"]
-    cons.print(
-        "Features to enable for this project "
-        "(space- or comma-separated names, empty for none):"
+    if not names:
+        return {}
+    width = max(len(name) for name in names)
+    selected = select_multiple(
+        names,
+        preprocessor=lambda name: (
+            f"{name:<{width}}  [dim]{registry[name].description}[/dim]"
+        ),
+        tick_character="✓",
+        tick_style="green",
+        cursor_style="cyan",
+        title="Features to enable for this project (none extra if you confirm empty):",
+        filterable=True,
+        config=_config(console),
     )
-    width = max((len(name) for name in names), default=0)
-    for name in names:
-        cons.print(f"  {name:<{width}}  [dim]{registry[name].description}[/dim]")
-
-    while True:
-        raw = Prompt.ask("Features", default="", console=cons, show_default=False)
-        selected = [part for part in raw.replace(",", " ").split() if part]
-        unknown = [name for name in selected if name not in registry]
-        if unknown:
-            cons.print(
-                f"Unknown feature(s): {', '.join(unknown)}. "
-                f"Expected one of: {', '.join(feature_names(registry))}"
-            )
-            continue
-        return {name: True for name in selected}
+    return {name: True for name in (selected or [])}
