@@ -55,3 +55,61 @@ def test_prompt_project_features_maps_names(monkeypatch) -> None:
 def test_prompt_project_features_empty(monkeypatch) -> None:
     monkeypatch.setattr("buddelkiste.prompts.select_multiple", lambda options, **k: [])
     assert prompt_project_features({}, console=_console()) == {}
+
+
+def test_prompt_project_features_omits_executable_allowlist(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_select_multiple(options, **kwargs):
+        seen["options"] = options
+        return []
+
+    monkeypatch.setattr("buddelkiste.prompts.select_multiple", fake_select_multiple)
+    config = {
+        "executables": {
+            "python": {"features": ["python", "git"]},
+        }
+    }
+    assert prompt_project_features(
+        config, executable="/usr/bin/python", console=_console()
+    ) == {}
+    assert "python" not in seen["options"]
+    assert "git" not in seen["options"]
+    assert "rust" in seen["options"]
+    assert "user" not in seen["options"]
+
+
+def test_prompt_project_features_omits_executable_table_trues(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_select_multiple(options, **kwargs):
+        seen["options"] = options
+        return ["ssh"]
+
+    monkeypatch.setattr("buddelkiste.prompts.select_multiple", fake_select_multiple)
+    config = {
+        "executables": {
+            "cursor-agent": {"features": {"cursor": True, "rust": False}},
+        }
+    }
+    selected = prompt_project_features(
+        config, executable="cursor-agent", console=_console()
+    )
+    assert selected == {"ssh": True}
+    assert "cursor" not in seen["options"]
+    assert "rust" in seen["options"]
+
+
+def test_prompt_project_features_unknown_executable_keeps_catalog(
+    monkeypatch,
+) -> None:
+    seen: dict = {}
+
+    def fake_select_multiple(options, **kwargs):
+        seen["options"] = options
+        return []
+
+    monkeypatch.setattr("buddelkiste.prompts.select_multiple", fake_select_multiple)
+    prompt_project_features({}, executable="python", console=_console())
+    assert "python" in seen["options"]
+    assert "git" in seen["options"]

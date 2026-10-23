@@ -5,7 +5,11 @@ from __future__ import annotations
 from beaupy import Config, select, select_multiple
 from rich.console import Console
 
-from buddelkiste.features import feature_names, load_feature_registry
+from buddelkiste.features import (
+    feature_names,
+    load_feature_registry,
+    lookup_executable_config,
+)
 
 _ACCESS_CHOICES: tuple[tuple[str, str], ...] = (
     ("yes", "this run only"),
@@ -36,14 +40,36 @@ def prompt_cwd_access(*, console: Console | None = None) -> str:
     return "no" if choice is None else choice
 
 
+def _executable_feature_names(config: dict, executable: str | None) -> set[str]:
+    """Features the executable config would turn on (list allowlist or true keys)."""
+    exec_cfg = lookup_executable_config(config, executable)
+    if exec_cfg is None or "features" not in exec_cfg:
+        return set()
+    spec = exec_cfg["features"]
+    if isinstance(spec, list):
+        return {str(name) for name in spec}
+    if isinstance(spec, dict):
+        return {str(name) for name, value in spec.items() if value}
+    return set()
+
+
 def prompt_project_features(
     config: dict,
     *,
+    executable: str | None = None,
     console: Console | None = None,
 ) -> dict[str, bool]:
-    """Ask which extra features to enable for a new project."""
+    """Ask which extra features to enable for a new project.
+
+    Features the current executable already enables are omitted from the list.
+    """
     registry = load_feature_registry(config)
-    names = [name for name in feature_names(registry) if name != "user"]
+    already = _executable_feature_names(config, executable)
+    names = [
+        name
+        for name in feature_names(registry)
+        if name != "user" and name not in already
+    ]
     if not names:
         return {}
     width = max(len(name) for name in names)

@@ -498,7 +498,7 @@ def run(
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     command = append_executable_args(command, config, executable)
-    config = ensure_cwd_project(config)
+    config = ensure_cwd_project(config, executable=executable)
     enabled = resolve_features(
         config,
         executable=executable,
@@ -1449,6 +1449,7 @@ def is_interactive() -> bool:
 def ensure_cwd_project(
     config: dict,
     *,
+    executable: str | None = None,
     cwd: Path | None = None,
 ) -> dict:
     """Ensure the working directory is under a ``[[projects]]`` entry.
@@ -1456,6 +1457,8 @@ def ensure_cwd_project(
     A ``[[binds]]`` mount that happens to cover cwd does not count. If no
     project covers cwd, interactively offer yes (this run), always (persist
     a ``[[projects]]`` entry), or no (abort), then which features to enable.
+    When ``executable`` is known, features it already enables are omitted
+    from the feature list.
     """
     here = (cwd if cwd is not None else Path.cwd()).resolve()
     if lookup_project_config(config, cwd=here) is not None:
@@ -1476,7 +1479,7 @@ def ensure_cwd_project(
     if choice == "no":
         raise click.Abort()
 
-    features = prompt_project_features(config)
+    features = prompt_project_features(config, executable=executable)
     table: dict = {"path": str(here)}
     if features:
         table["features"] = features

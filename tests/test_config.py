@@ -358,7 +358,7 @@ def test_ensure_cwd_yes_injects_project(
     monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "yes")
     monkeypatch.setattr(
         "buddelkiste.prompts.prompt_project_features",
-        lambda config: {"python": True},
+        lambda config, **kwargs: {"python": True},
     )
 
     result = ensure_cwd_project({})
@@ -384,7 +384,7 @@ def test_ensure_cwd_always_persists_project(
     monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "always")
     monkeypatch.setattr(
         "buddelkiste.prompts.prompt_project_features",
-        lambda config: {"rust": True},
+        lambda config, **kwargs: {"rust": True},
     )
 
     result = ensure_cwd_project({})
@@ -393,6 +393,25 @@ def test_ensure_cwd_always_persists_project(
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
     assert "binds" not in data
     assert data["projects"] == [{"path": root, "features": {"rust": True}}]
+
+
+def test_ensure_cwd_forwards_executable_to_feature_prompt(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: True)
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", lambda: "yes")
+    seen: dict = {}
+
+    def fake_features(config, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("buddelkiste.prompts.prompt_project_features", fake_features)
+    ensure_cwd_project({}, executable="/usr/bin/python")
+    assert seen["executable"] == "/usr/bin/python"
 
 
 def test_ensure_cwd_abort(
