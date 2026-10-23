@@ -124,8 +124,9 @@ is always bound read-write, and an optional features list or table is applied
 after the executable's features. Nested keys such as network.mode stay on the
 same array element. Feature defaults → global features →
 executables.<name>.features → project features → --feature / --no-feature.
-`bk info [EXECUTABLE]` prints that merged view (plus resolved network and
-dbus-proxy) as TOML for the current directory.
+`bk info [EXECUTABLE]` prints a human-readable view of that merged config
+for the current directory. `bk config show [EXECUTABLE]` dumps the same
+tables as TOML.
 
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
@@ -585,6 +586,29 @@ def list_net_presets() -> None:
 @cli.command("info")
 @click.argument("executable", required=False)
 def info(executable: str | None) -> None:
+    """Print a human-readable view of the active config.
+
+    Applies feature defaults, then global ``features``, then
+    ``executables.<name>.features``, then the active ``[[projects]]`` entry.
+    Network and dbus-proxy use the same global → executable order. Use
+    ``bk config show`` for the same merge as TOML.
+    """
+    config = load_config()
+    cwd = Path.cwd()
+    click.echo(
+        format_active_info(config, executable=executable, cwd=cwd),
+        nl=False,
+    )
+
+
+@cli.group("config")
+def config_group() -> None:
+    """Inspect the merged configuration."""
+
+
+@config_group.command("show")
+@click.argument("executable", required=False)
+def config_show(executable: str | None) -> None:
     """Print the merged config for this directory and optional executable.
 
     Applies feature defaults, then global ``features``, then
@@ -1118,6 +1142,163 @@ def format_effective_config(
     )
 
 
+_INFO_SKIP = frozenset(
+    {
+        "binds",
+        "dbus_proxy",
+        "envvars",
+        "feature",
+        "features",
+        "network",
+        "shims",
+    }
+)
+
+
+def format_active_info(
+    config: dict,
+    *,
+    executable: str | None = None,
+    cwd: Path | None = None,
+) -> str:
+    """Human-readable view of the merged config for ``cwd`` and ``executable``."""
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    project = lookup_project_config(config, cwd=here)
+    merged = effective_config(config, executable=executable, cwd=here)
+    exec_cfg = lookup_executable_config(config, executable)
+
+    lines = [
+        f"config: {config_path()}",
+        f"cwd: {here}",
+        f"project: {project[0] if project is not None else '(none)'}",
+        f"executable: {executable if executable else '(none)'}",
+    ]
+    extra_args = exec_cfg.get("args") if exec_cfg else None
+    if isinstance(extra_args, list) and extra_args:
+        _append_info_list(lines, "args", extra_args)
+
+    lines.append("")
+    lines.append(f"shims: {_info_inline(merged.get('shims', True))}")
+
+    features = merged.get("features")
+    enabled = (
+        [name for name, on in features.items() if on]
+        if isinstance(features, Mapping)
+        else []
+    )
+    lines.append("")
+    _append_info_list(lines, "features", enabled)
+
+    network = merged.get("network")
+    if isinstance(network, Mapping):
+        lines.append("")
+        lines.append("network:")
+        for key in ("mode", "backend", "policy"):
+            if key in network:
+                lines.append(f"  {key}: {_info_inline(network[key])}")
+        for key in (
+            "allow",
+            "deny",
+            "allow_presets",
+            "deny_presets",
+            "allow_hosts",
+            "deny_hosts",
+        ):
+            _append_info_list(lines, key, network.get(key) or (), indent="  ")
+
+    dbus = merged.get("dbus_proxy")
+    if isinstance(dbus, Mapping):
+        lines.append("")
+        lines.append("dbus_proxy:")
+        for key in ("see", "talk", "own", "call", "broadcast"):
+            _append_info_list(lines, key, dbus.get(key) or (), indent="  ")
+
+    binds = merged.get("binds")
+    if isinstance(binds, list) and binds:
+        lines.append("")
+        _append_info_list(lines, "binds", [_info_bind_item(item) for item in binds])
+
+    envvars = merged.get("envvars")
+    if isinstance(envvars, list) and envvars:
+        lines.append("")
+        _append_info_list(lines, "envvars", [_info_envvar_item(item) for item in envvars])
+
+    for key, value in merged.items():
+        if key in _INFO_SKIP:
+            continue
+        lines.append("")
+        _append_info_value(lines, key, value)
+
+    return "\n".join(lines) + "\n"
+
+
+def _info_inline(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _info_bind_item(item: object) -> str:
+    if not isinstance(item, Mapping):
+        return str(item)
+    source = item.get("source") or item.get("glob") or "?"
+    mode = item.get("mode", "ro")
+    target = item.get("target")
+    if target:
+        return f"{source} -> {target} ({mode})"
+    return f"{source} ({mode})"
+
+
+def _info_envvar_item(item: object) -> str:
+    if not isinstance(item, Mapping):
+        return str(item)
+    name = item.get("name", "?")
+    if "value" in item:
+        return f"{name}={item['value']}"
+    return f"{name} (from environment)"
+
+
+def _append_info_list(
+    lines: list[str],
+    key: str,
+    items: Sequence[object],
+    *,
+    indent: str = "",
+) -> None:
+    values = list(items)
+    if not values:
+        lines.append(f"{indent}{key}: (none)")
+        return
+    lines.append(f"{indent}{key} ({len(values)}):")
+    for item in values:
+        lines.append(f"{indent}  - {_info_inline(item)}")
+
+
+def _append_info_value(
+    lines: list[str],
+    key: str,
+    value: object,
+    *,
+    indent: str = "",
+) -> None:
+    if value is None:
+        return
+    if isinstance(value, Mapping):
+        if not value:
+            lines.append(f"{indent}{key}: (none)")
+            return
+        lines.append(f"{indent}{key}:")
+        for nested_key, nested in value.items():
+            _append_info_value(lines, str(nested_key), nested, indent=f"{indent}  ")
+        return
+    if isinstance(value, (list, tuple)):
+        _append_info_list(lines, key, value, indent=indent)
+        return
+    lines.append(f"{indent}{key}: {_info_inline(value)}")
+
+
 def format_toml_document(
     data: Mapping[str, object],
     *,
@@ -1445,10 +1626,12 @@ __all__ = [
     "append_executable_args",
     "bind_config",
     "cli",
+    "config_show",
     "cwd_is_covered",
     "effective_config",
     "ensure_cwd_project",
     "find_sandbox_ssh_key",
+    "format_active_info",
     "format_effective_config",
     "get_bind_args",
     "get_binds",

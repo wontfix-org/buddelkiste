@@ -12,6 +12,7 @@ from buddelkiste.cli import (
     add_project_to_config,
     effective_config,
     ensure_cwd_project,
+    format_active_info,
     format_toml_document,
     get_binds,
     get_env_args,
@@ -117,6 +118,44 @@ def test_effective_config_applies_layers(tmp_path: Path) -> None:
     assert merged["binds"] == [{"source": "/tmp", "mode": "ro"}]
     assert "executables" not in merged
     assert "projects" not in merged
+
+
+def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "features": ["user", "git"],
+        "network": {"mode": "filter", "allow": ["1.1.1.1/32"]},
+        "dbus_proxy": {"talk": ["org.foo.Bar"]},
+        "executables": {
+            "python": {
+                "features": {"python": True},
+                "args": ["-u"],
+                "network": {"mode": "none"},
+            }
+        },
+        "projects": [{"path": str(repo), "features": {"rust": True}}],
+        "binds": [{"source": "/tmp", "mode": "ro"}],
+        "envvars": [{"name": "FOO", "value": "bar"}, {"name": "FROM_ENV"}],
+        "docker_proxy": {"images": ["alpine:3.20"]},
+        "feature": {"zig": {"description": "Zig toolchain cache"}},
+    }
+    text = format_active_info(config, executable="python", cwd=repo)
+    assert f"project: {repo.resolve()}" in text
+    assert "executable: python" in text
+    assert "args (1):\n  - -u\n" in text
+    assert "  - user\n" in text
+    assert "  - git\n" in text
+    assert "  - python\n" in text
+    assert "  - rust\n" in text
+    assert "  mode: none" in text
+    assert "  - org.foo.Bar\n" in text
+    assert "  - /tmp (ro)\n" in text
+    assert "  - FOO=bar\n" in text
+    assert "  - FROM_ENV (from environment)\n" in text
+    assert "docker_proxy:" in text
+    assert "  - alpine:3.20\n" in text
+    assert "Zig toolchain cache" not in text
 
 
 def test_format_toml_document_roundtrip() -> None:

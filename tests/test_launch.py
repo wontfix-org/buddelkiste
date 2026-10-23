@@ -123,6 +123,8 @@ def test_cli_group_help() -> None:
     assert "run" in result.output
     assert "list-features" in result.output
     assert "list-net-presets" in result.output
+    assert "info" in result.output
+    assert "config" in result.output
     assert "shims" in result.output
     assert "--version" in result.output
 

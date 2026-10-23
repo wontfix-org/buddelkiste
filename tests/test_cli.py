@@ -116,6 +116,77 @@ def test_cli_info_defaults(tmp_config: Path, tmp_path: Path, monkeypatch: pytest
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli, ["info"])
     assert result.exit_code == 0, result.output
+    assert f"config: {tmp_config}" in result.output
+    assert f"cwd: {tmp_path.resolve()}" in result.output
+    assert "project: (none)" in result.output
+    assert "executable: (none)" in result.output
+    assert "shims: true" in result.output
+    assert "  - user\n" in result.output
+    assert "  - python\n" not in result.output
+    assert "  mode: filter" in result.output
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(result.output)
+
+
+def test_cli_info_merges_global_executable_and_project(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    tmp_config.write_text(
+        'features = ["user", "git"]\n'
+        "\n"
+        "[network]\n"
+        'mode = "filter"\n'
+        'allow = ["1.1.1.1/32"]\n'
+        "\n"
+        "[dbus_proxy]\n"
+        'talk = ["org.foo.Bar"]\n'
+        "\n"
+        "[feature.zig]\n"
+        'description = "Zig toolchain cache"\n'
+        "\n"
+        "[executables.python]\n"
+        "features = { python = true }\n"
+        'args = ["-u"]\n'
+        "\n"
+        "[executables.python.network]\n"
+        'mode = "none"\n'
+        "\n"
+        "[[projects]]\n"
+        f"path = {json.dumps(str(repo))}\n"
+        "features = { rust = true }\n"
+        "\n"
+        "[[binds]]\n"
+        'source = "/tmp"\n'
+        'mode = "ro"\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["info", "/usr/bin/python"])
+    assert result.exit_code == 0, result.output
+    assert f"project: {repo.resolve()}" in result.output
+    assert "executable: /usr/bin/python" in result.output
+    assert "  - -u\n" in result.output
+    assert "  - user\n" in result.output
+    assert "  - git\n" in result.output
+    assert "  - python\n" in result.output
+    assert "  - rust\n" in result.output
+    assert "  - cursor\n" not in result.output
+    assert "  mode: none" in result.output
+    assert "  - org.foo.Bar\n" in result.output
+    assert "  - /tmp (ro)\n" in result.output
+    assert "Zig toolchain cache" not in result.output
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(result.output)
+
+
+def test_cli_config_show_defaults(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["config", "show"])
+    assert result.exit_code == 0, result.output
     data = tomllib.loads(result.output)
     assert data["features"]["user"] is True
     assert data["features"]["python"] is False
@@ -127,7 +198,7 @@ def test_cli_info_defaults(tmp_config: Path, tmp_path: Path, monkeypatch: pytest
     assert "executable: (none)" in result.output
 
 
-def test_cli_info_merges_global_executable_and_project(
+def test_cli_config_show_merges_global_executable_and_project(
     tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -161,7 +232,7 @@ def test_cli_info_merges_global_executable_and_project(
         'mode = "ro"\n',
         encoding="utf-8",
     )
-    result = CliRunner().invoke(cli, ["info", "/usr/bin/python"])
+    result = CliRunner().invoke(cli, ["config", "show", "/usr/bin/python"])
     assert result.exit_code == 0, result.output
     data = tomllib.loads(result.output)
     assert data["features"]["user"] is True

@@ -18,8 +18,9 @@ bk run
 # Catalog helpers
 bk list-features
 bk list-net-presets
-bk info                 # merged config for cwd
+bk info                 # human-readable active config for cwd
 bk info cursor-agent    # plus that executable's overlays
+bk config show          # same merge, as TOML
 
 # PATH shims for configured [executables.*]
 bk shims install
@@ -94,7 +95,8 @@ bk run --feature ssh --feature git git fetch
 Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
 active `[[projects]]` `features` → `--feature` / `--no-feature`.
-`bk info` (optional executable name) prints that merged view as TOML.
+`bk info` (optional executable name) prints that merged view in a
+human-readable form. `bk config show` dumps the same tables as TOML.
 
 ### D-Bus proxy
 
