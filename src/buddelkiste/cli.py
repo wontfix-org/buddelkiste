@@ -109,7 +109,8 @@ not be enabled at the same time). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 Before starting, bk refuses launches with conflicting mounts, conflicting
 --setenv values (host-forwarded or setup-defined), or mutually exclusive
-features.
+features. Two binds for the same path that differ only by ro vs rw follow
+the top-level bind_conflicts setting (error, stronger, or weaker).
 
 executables: Table keyed by executable file name. A path key is matched by its
 file name only, so the same entry applies to a bare command or any absolute
@@ -133,6 +134,11 @@ tables as TOML.
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
 entry sets shim = true. Per-executable shim overrides this default.
+
+bind_conflicts: How to handle two binds for the same path that differ only
+by ro vs rw. "error" (default) refuses to start. "stronger" keeps the
+read-write bind. "weaker" keeps the read-only bind. Other mount mismatches
+(different sources, overlay vs bind, tmpfs) still fail.
 
 network: Global network settings (mode, backend, policy, allow, deny,
 allow_presets, deny_presets). backend is pasta (default) or slirp4netns
@@ -246,6 +252,7 @@ needs prune first.
 
 \b
   # shims = false  # disable PATH shims globally (per-entry shim=true still wins)
+  # bind_conflicts = "error"  # or "stronger" (keep rw) / "weaker" (keep ro)
 
 \b
   [[binds]]
@@ -1133,8 +1140,11 @@ def effective_config(
     if isinstance(network, dict) and isinstance(network.get("presets"), dict):
         network_table["presets"] = dict(network["presets"])
 
+    from buddelkiste.conflicts import bind_conflict_policy
+
     merged: dict = {
         "shims": global_shims_enabled(config),
+        "bind_conflicts": bind_conflict_policy(config),
         "features": {name: bool(enabled.get(name)) for name in feature_names(registry)},
         "network": network_table,
     }
@@ -1149,7 +1159,7 @@ def effective_config(
         }
 
     for key, value in config.items():
-        if key in _PASSTHROUGH_SKIP or key == "shims":
+        if key in _PASSTHROUGH_SKIP or key in {"shims", "bind_conflicts"}:
             continue
         merged[key] = value
     return merged
@@ -1178,6 +1188,7 @@ def format_effective_config(
 
 _INFO_SKIP = frozenset(
     {
+        "bind_conflicts",
         "binds",
         "dbus_proxy",
         "envvars",
@@ -1213,6 +1224,7 @@ def format_active_info(
 
     lines.append("")
     lines.append(f"shims: {_info_inline(merged.get('shims', True))}")
+    lines.append(f"bind_conflicts: {_info_inline(merged.get('bind_conflicts', 'error'))}")
 
     features = merged.get("features")
     enabled = (
@@ -1443,7 +1455,9 @@ def get_binds(
     if project is not None:
         root, _table = project
         binds.append(bind_config(root, mode="rw"))
-    return binds
+    from buddelkiste.conflicts import bind_conflict_policy, resolve_bind_conflicts
+
+    return resolve_bind_conflicts(binds, bind_conflict_policy(config))
 
 
 def config_path() -> Path:

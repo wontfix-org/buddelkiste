@@ -123,6 +123,112 @@ def test_get_binds_appends_config_binds(
     assert binds[-2].source == str(extra)
 
 
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        ("stronger", RWBindConfig),
+        ("weaker", ROBindConfig),
+    ],
+)
+def test_get_binds_resolves_ro_rw_for_same_path(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+    expected: type,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    binds = get_binds(
+        {
+            "bind_conflicts": policy,
+            "binds": [
+                {"source": str(extra), "mode": "ro"},
+                {"source": str(extra), "mode": "rw"},
+            ],
+        },
+        {name: False for name in FEATURE_NAMES},
+    )
+    matched = [bind for bind in binds if getattr(bind, "source", None) == str(extra)]
+    assert len(matched) == 1
+    assert isinstance(matched[0], expected)
+
+
+def test_get_binds_resolves_feature_vs_config_mode(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    binds = get_binds(
+        {
+            "bind_conflicts": "weaker",
+            "feature": {
+                "extra": {
+                    "default": True,
+                    "binds": [{"source": str(extra), "mode": "rw"}],
+                }
+            },
+            "binds": [{"source": str(extra), "mode": "ro"}],
+        },
+        {"extra": True},
+    )
+    matched = [bind for bind in binds if getattr(bind, "source", None) == str(extra)]
+    assert len(matched) == 1
+    assert isinstance(matched[0], ROBindConfig)
+
+
+def test_get_binds_resolves_same_target_path(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    binds = get_binds(
+        {
+            "bind_conflicts": "stronger",
+            "binds": [
+                {"source": str(extra), "target": "/mnt/extra", "mode": "ro"},
+                {"source": str(extra), "target": "/mnt/extra", "mode": "rw"},
+            ],
+        },
+        {name: False for name in FEATURE_NAMES},
+    )
+    matched = [
+        bind
+        for bind in binds
+        if getattr(bind, "source", None) == str(extra)
+        and getattr(bind, "target", None) == "/mnt/extra"
+    ]
+    assert len(matched) == 1
+    assert isinstance(matched[0], RWBindConfig)
+
+
+def test_get_binds_keeps_different_targets(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    binds = get_binds(
+        {
+            "bind_conflicts": "stronger",
+            "binds": [
+                {"source": str(extra), "target": "/mnt/a", "mode": "ro"},
+                {"source": str(extra), "target": "/mnt/b", "mode": "rw"},
+            ],
+        },
+        {name: False for name in FEATURE_NAMES},
+    )
+    matched = [bind for bind in binds if getattr(bind, "source", None) == str(extra)]
+    assert len(matched) == 2
+
+
 def test_get_binds_missing_source_raises(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

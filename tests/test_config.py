@@ -106,8 +106,10 @@ def test_effective_config_applies_layers(tmp_path: Path) -> None:
         },
         "projects": [{"path": str(repo), "features": {"rust": True}}],
         "binds": [{"source": "/tmp", "mode": "ro"}],
+        "bind_conflicts": "weaker",
     }
     merged = effective_config(config, executable="python", cwd=repo)
+    assert merged["bind_conflicts"] == "weaker"
     assert merged["features"]["user"] is True
     assert merged["features"]["git"] is True
     assert merged["features"]["python"] is True
@@ -148,6 +150,7 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     assert f"project: {repo.resolve()}" in text
     assert "executable: python" in text
     assert "args (1):\n  - -u\n" in text
+    assert "bind_conflicts: error" in text
     assert "  - user\n" in text
     assert "  - git\n" in text
     assert "  - python\n" in text

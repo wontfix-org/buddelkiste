@@ -208,6 +208,7 @@ images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
 # # images = ["*"]
 
 # shims = false  # disable PATH shims globally (per-entry shim = true still wins)
+# bind_conflicts = "error"  # or "stronger" (keep rw) / "weaker" (keep ro)
 
 [[binds]]
 source = "/path/to/directory"
@@ -267,6 +268,11 @@ A `git` table binds every tracked file in that work tree with the same `mode`.
 With `glob`, an optional `target` is a directory and each match is mounted at
 `target/<basename>`. With `git`, an optional `target` is a directory and each
 file is mounted at `target/<path-relative-to-the-work-tree>`.
+
+If two binds claim the same path and differ only by `ro` vs `rw`,
+`bind_conflicts` chooses what happens: `error` (default) refuses to start,
+`stronger` keeps the read-write bind, and `weaker` keeps the read-only bind.
+Other mismatches (different sources, overlay vs bind, tmpfs) still fail.
 
 The current working directory must be a configured project: the working
 directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`

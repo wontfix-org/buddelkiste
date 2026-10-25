@@ -9,6 +9,7 @@ from buddelkiste.binds import ROBindConfig, RWBindConfig
 from buddelkiste.conflicts import (
     EnvClaim,
     MountClaim,
+    bind_conflict_policy,
     check_feature_mutex,
     check_launch_conflicts,
     claims_from_bind,
@@ -17,6 +18,7 @@ from buddelkiste.conflicts import (
     find_mount_conflicts,
     iter_bind_claims,
     iter_env_claims,
+    resolve_bind_conflicts,
 )
 from buddelkiste.features import (
     FEATURE_NAMES,
@@ -31,6 +33,17 @@ def _clear_feature_caches() -> None:
     clear_feature_caches()
     yield
     clear_feature_caches()
+
+
+def test_bind_conflict_policy_default_and_values() -> None:
+    assert bind_conflict_policy({}) == "error"
+    assert bind_conflict_policy(None) == "error"
+    assert bind_conflict_policy({"bind_conflicts": "Stronger"}) == "stronger"
+    assert bind_conflict_policy({"bind_conflicts": "weaker"}) == "weaker"
+    with pytest.raises(click.ClickException, match="bind_conflicts"):
+        bind_conflict_policy({"bind_conflicts": "prompt"})
+    with pytest.raises(click.ClickException, match="bind_conflicts"):
+        bind_conflict_policy({"bind_conflicts": True})
 
 
 def test_identical_mount_claims_are_not_conflicts() -> None:
@@ -56,6 +69,69 @@ def test_mount_conflict_different_source_or_kind() -> None:
     assert "/var/run/docker.sock" in errors[0]
     assert "docker" in errors[0]
     assert "proxy.sock" in errors[0]
+
+
+def test_mount_conflict_ro_vs_rw_same_source() -> None:
+    claims = [
+        MountClaim("/data", "ro-bind", "/data", "config binds[0]"),
+        MountClaim("/data", "bind", "/data", "feature 'cache'"),
+    ]
+    errors = find_mount_conflicts(claims)
+    assert len(errors) == 1
+    assert "/data" in errors[0]
+
+
+@pytest.mark.parametrize("policy", ["stronger", "weaker"])
+def test_mount_conflict_ro_vs_rw_resolved(policy: str) -> None:
+    claims = [
+        MountClaim("/data", "ro-bind", "/data", "config binds[0]"),
+        MountClaim("/data", "bind", "/data", "feature 'cache'"),
+    ]
+    assert find_mount_conflicts(claims, bind_conflicts=policy) == []
+
+
+def test_mount_conflict_different_sources_not_resolved() -> None:
+    claims = [
+        MountClaim("/mnt/data", "ro-bind", "/a", "config binds[0]"),
+        MountClaim("/mnt/data", "bind", "/b", "config binds[1]"),
+    ]
+    errors = find_mount_conflicts(claims, bind_conflicts="stronger")
+    assert len(errors) == 1
+    assert "/mnt/data" in errors[0]
+
+
+def test_mount_conflict_overlay_not_resolved() -> None:
+    claims = [
+        MountClaim("/data", "ro-bind", "/data", "config binds[0]"),
+        MountClaim("/data", "overlay", "/data (upper=/tmp/up)", "config binds[1]"),
+    ]
+    errors = find_mount_conflicts(claims, bind_conflicts="weaker")
+    assert len(errors) == 1
+
+
+def test_resolve_bind_conflicts_stronger_keeps_rw(tmp_path: Path) -> None:
+    path = tmp_path / "data"
+    path.mkdir()
+    binds = [ROBindConfig(path), RWBindConfig(path)]
+    resolved = resolve_bind_conflicts(binds, "stronger")
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], RWBindConfig)
+
+
+def test_resolve_bind_conflicts_weaker_keeps_ro(tmp_path: Path) -> None:
+    path = tmp_path / "data"
+    path.mkdir()
+    binds = [ROBindConfig(path), RWBindConfig(path)]
+    resolved = resolve_bind_conflicts(binds, "weaker")
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], ROBindConfig)
+
+
+def test_resolve_bind_conflicts_error_keeps_both(tmp_path: Path) -> None:
+    path = tmp_path / "data"
+    path.mkdir()
+    binds = [ROBindConfig(path), RWBindConfig(path)]
+    assert resolve_bind_conflicts(binds, "error") == binds
 
 
 def test_env_conflict_different_values() -> None:
@@ -209,6 +285,46 @@ def test_check_launch_conflicts_bind_target(
             config=config,
             setup_parts=setup_parts,
         )
+
+
+def test_check_launch_conflicts_resolves_ro_rw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "run").mkdir()
+    path = tmp_path / "shared"
+    path.mkdir()
+    config = {
+        "bind_conflicts": "stronger",
+        "binds": [
+            {"source": str(path), "mode": "ro"},
+            {"source": str(path), "mode": "rw"},
+        ],
+    }
+    enabled = {name: False for name in FEATURE_NAMES}
+    check_launch_conflicts(enabled=enabled, config=config)
+
+
+def test_check_launch_conflicts_ro_rw_errors_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "run").mkdir()
+    path = tmp_path / "shared"
+    path.mkdir()
+    config = {
+        "binds": [
+            {"source": str(path), "mode": "ro"},
+            {"source": str(path), "mode": "rw"},
+        ],
+    }
+    enabled = {name: False for name in FEATURE_NAMES}
+    with pytest.raises(click.ClickException, match=str(path)):
+        check_launch_conflicts(enabled=enabled, config=config)
 
 
 def test_claims_from_bind_skips_missing_ro(tmp_path: Path) -> None:

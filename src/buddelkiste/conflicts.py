@@ -66,6 +66,111 @@ _BIND_FLAG_KIND = {
     "--dev-bind-try": "dev-bind-try",
 }
 
+# Read-only is weaker; read-write is stronger. Overlay / tmpfs / dev-bind are
+# not ranked and cannot be resolved by bind_conflicts.
+_RO_KINDS = frozenset({"ro-bind", "ro-bind-try"})
+_RW_KINDS = frozenset({"bind", "bind-try"})
+BIND_CONFLICT_POLICIES = ("error", "stronger", "weaker")
+DEFAULT_BIND_CONFLICTS = "error"
+
+
+def normalize_bind_conflicts(raw: object, *, where: str = "bind_conflicts") -> str:
+    """Return ``error``, ``stronger``, or ``weaker``."""
+    if not isinstance(raw, str):
+        allowed = ", ".join(repr(item) for item in BIND_CONFLICT_POLICIES)
+        raise click.ClickException(f"{where} must be {allowed} (got {raw!r})")
+    value = raw.strip().lower()
+    if value not in BIND_CONFLICT_POLICIES:
+        allowed = ", ".join(repr(item) for item in BIND_CONFLICT_POLICIES)
+        raise click.ClickException(f"{where} must be {allowed} (got {raw!r})")
+    return value
+
+
+def bind_conflict_policy(config: Mapping | None = None) -> str:
+    """Return the global ``bind_conflicts`` policy (default ``error``)."""
+    if not config or "bind_conflicts" not in config:
+        return DEFAULT_BIND_CONFLICTS
+    return normalize_bind_conflicts(config["bind_conflicts"])
+
+
+def _bind_mode_rank(kind: str) -> int | None:
+    if kind in _RO_KINDS:
+        return 0
+    if kind in _RW_KINDS:
+        return 1
+    return None
+
+
+def _norm_source(source: str | None) -> str | None:
+    if source is None:
+        return None
+    return _norm_target(source)
+
+
+def _resolvable_ro_rw_conflict(claims: Sequence[MountClaim]) -> bool:
+    """True when claims differ only by ro vs rw for one source and target."""
+    ranks = {_bind_mode_rank(claim.kind) for claim in claims}
+    if ranks != {0, 1}:
+        return False
+    sources = {_norm_source(claim.source) for claim in claims}
+    return len(sources) == 1
+
+
+def _winning_mode_rank(claims: Sequence[MountClaim], policy: str) -> int:
+    ranks = [
+        rank
+        for claim in claims
+        if (rank := _bind_mode_rank(claim.kind)) is not None
+    ]
+    return max(ranks) if policy == "stronger" else min(ranks)
+
+
+def resolve_bind_conflicts(binds: Sequence[object], policy: str) -> list:
+    """Drop the losing ro/rw bind when ``policy`` is ``stronger`` or ``weaker``.
+
+    ``error`` leaves the list unchanged so launch-time conflict detection can
+    report both sides. Other mismatches (different sources, overlay, tmpfs)
+    are not collapsed.
+    """
+    policy = normalize_bind_conflicts(policy)
+    if policy == "error":
+        return list(binds)
+
+    entries: list[tuple[object, list[MountClaim]]] = []
+    by_target: dict[str, list[int]] = defaultdict(list)
+    for bind in binds:
+        claims = claims_from_bind(bind, "bind")
+        index = len(entries)
+        entries.append((bind, claims))
+        seen_targets: set[str] = set()
+        for claim in claims:
+            if claim.target in seen_targets:
+                continue
+            seen_targets.add(claim.target)
+            by_target[claim.target].append(index)
+
+    drop: set[int] = set()
+    for target, indexes in by_target.items():
+        group = [
+            claim
+            for index in indexes
+            for claim in entries[index][1]
+            if claim.target == target
+        ]
+        if not _resolvable_ro_rw_conflict(group):
+            continue
+        win = _winning_mode_rank(group, policy)
+        for index in indexes:
+            for claim in entries[index][1]:
+                if claim.target != target:
+                    continue
+                rank = _bind_mode_rank(claim.kind)
+                if rank is not None and rank != win:
+                    drop.add(index)
+                    break
+
+    return [bind for index, (bind, _claims) in enumerate(entries) if index not in drop]
+
 
 def _norm_target(path: Path | str) -> str:
     return os.path.normpath(os.fspath(path))
@@ -296,8 +401,17 @@ def check_feature_mutex(
     return errors
 
 
-def find_mount_conflicts(claims: Iterable[MountClaim]) -> list[str]:
-    """Return errors for the same target claimed incompatibly."""
+def find_mount_conflicts(
+    claims: Iterable[MountClaim],
+    *,
+    bind_conflicts: str = DEFAULT_BIND_CONFLICTS,
+) -> list[str]:
+    """Return errors for the same target claimed incompatibly.
+
+    When ``bind_conflicts`` is ``stronger`` or ``weaker``, a same-source
+    ro vs rw pair is treated as resolved rather than as an error.
+    """
+    policy = normalize_bind_conflicts(bind_conflicts)
     by_target: dict[str, list[MountClaim]] = defaultdict(list)
     for claim in claims:
         by_target[claim.target].append(claim)
@@ -306,6 +420,8 @@ def find_mount_conflicts(claims: Iterable[MountClaim]) -> list[str]:
     for target, group in sorted(by_target.items()):
         identities = {claim.identity for claim in group}
         if len(identities) <= 1:
+            continue
+        if policy != "error" and _resolvable_ro_rw_conflict(group):
             continue
         lines = [f"Mount target {target}:"]
         # Deduplicate identical claims when listing.
@@ -358,6 +474,7 @@ def check_launch_conflicts(
     config. Setup fragments are merged when given.
     """
     errors = check_feature_mutex(enabled, config)
+    policy = bind_conflict_policy(config)
 
     mount_claims = list(iter_bind_claims(config, enabled))
     known_mounts = {(c.target, c.identity) for c in mount_claims}
@@ -370,7 +487,7 @@ def check_launch_conflicts(
 
     for name, part in setup_parts:
         mount_claims.extend(claims_from_bwrap_args(part, f"feature {name!r} setup"))
-    errors.extend(find_mount_conflicts(mount_claims))
+    errors.extend(find_mount_conflicts(mount_claims, bind_conflicts=policy))
 
     env_claims = list(iter_env_claims(config, enabled, environ=environ))
     for name, part in setup_parts:
