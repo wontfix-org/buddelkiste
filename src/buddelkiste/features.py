@@ -32,6 +32,8 @@ from buddelkiste.binds import (
     RWBindConfig,
     Tmpfs,
     bind_config,
+    normalize_bind_symlinks,
+    set_bind_origin,
 )
 from buddelkiste.which import log_cmdline, which
 
@@ -721,7 +723,9 @@ def _normalize_bind_mode(mode: str, *, where: str) -> str:
     )
 
 
-_BIND_SPEC_KEYS = frozenset({"source", "target", "mode", "glob", "git", "nullglob"})
+_BIND_SPEC_KEYS = frozenset(
+    {"source", "target", "mode", "glob", "git", "nullglob", "symlink"}
+)
 _BIND_SELECTORS = ("source", "glob", "git")
 _GIT_OVERRIDE_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
 
@@ -737,6 +741,15 @@ def _bind_from_parts(
         return bind_config(source, target, mode=mode)
     except ValueError as exc:
         raise click.ClickException(f"{where}: {exc}") from exc
+
+
+def _bind_symlink_override(spec: dict, *, where: str) -> str | None:
+    if "symlink" not in spec:
+        return None
+    try:
+        return normalize_bind_symlinks(spec["symlink"], where=f"{where}.symlink")
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _git_command_env() -> dict[str, str]:
@@ -784,7 +797,11 @@ def _git_tracked_files(repo: str, *, where: str) -> tuple[str, list[str]]:
         if not rel:
             continue
         path = Path(toplevel) / os.fsdecode(rel)
-        if path.exists() and not path.is_dir():
+        if path.is_symlink():
+            if path.is_dir():
+                continue
+            paths.append(str(path))
+        elif path.exists() and not path.is_dir():
             paths.append(str(path))
     return toplevel, sorted(paths)
 
@@ -799,7 +816,9 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
     each match is mounted at ``target/<basename>``; with ``git`` it is a
     directory and each tracked file is mounted at ``target/<relpath>``.
     ``nullglob`` (with ``glob`` or ``git``) allows zero matches; otherwise an
-    empty match is an error.
+    empty match is an error. ``symlink`` (``follow``, ``preserve``, or
+    ``error``) overrides the global ``bind_symlinks`` policy for file
+    symbolic links in this table.
     """
     if "read_only" in spec:
         raise click.ClickException(
@@ -833,10 +852,17 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
 
     target = expand_bind_path(str(spec["target"])) if "target" in spec else None
     mode = _normalize_bind_mode(str(spec.get("mode", "ro")), where=where)
+    symlink = _bind_symlink_override(spec, where=where)
+
+    def _make(source: str, dest: str | None):
+        bind = _bind_from_parts(source, dest, mode, where=where)
+        if symlink is not None:
+            bind.symlink = symlink
+        return bind
 
     if has_source:
         source = expand_bind_path(str(spec["source"]))
-        return [_bind_from_parts(source, target, mode, where=where)]
+        return [_make(source, target)]
 
     if has_glob:
         pattern = expand_bind_path(str(spec["glob"]))
@@ -849,7 +875,7 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
         binds = []
         for match in matches:
             match_target = None if target is None else str(Path(target) / Path(match).name)
-            binds.append(_bind_from_parts(match, match_target, mode, where=where))
+            binds.append(_make(match, match_target))
         return binds
 
     repo = expand_bind_path(str(spec["git"]))
@@ -866,7 +892,7 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
         else:
             rel = Path(match).relative_to(toplevel)
             match_target = str(Path(target) / rel)
-        binds.append(_bind_from_parts(match, match_target, mode, where=where))
+        binds.append(_make(match, match_target))
     return binds
 
 
@@ -1186,9 +1212,11 @@ def feature_binds(
     config: dict | None = None,
 ) -> list:
     registry = load_feature_registry(config or {})
-    binds = base_binds()
+    binds = [set_bind_origin(bind, "base") for bind in base_binds()]
     for name in enabled_feature_names(enabled, registry):
-        binds.extend(registry[name].binds())
+        binds.extend(
+            set_bind_origin(bind, f"feature {name}") for bind in registry[name].binds()
+        )
     return binds
 
 

@@ -104,7 +104,7 @@ or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
 set description, default, env (allowlisted variable names), binds (list of
-source/glob/git/target/mode tables), and conflicts_with (other feature names that must
+source/glob/git/target/mode/symlink tables), and conflicts_with (other feature names that must
 not be enabled at the same time). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 Before starting, bk refuses launches with conflicting mounts, conflicting
@@ -140,6 +140,17 @@ by ro vs rw. "error" (default) refuses to start. "stronger" keeps the
 read-write bind. "weaker" keeps the read-only bind. Other mount mismatches
 (different sources, overlay vs bind, tmpfs) still fail.
 
+bind_symlinks: How to handle a bind source that is a symbolic link to a
+file (including dangling links). "follow" (default) bind-mounts the
+referent at its real path and recreates the link with --symlink; bwrap
+cannot mount onto a symlink destination, so the link path is never used
+as a --bind dest. "preserve" only emits --symlink with the stored text,
+so an unbound target is not pulled in. "error" refuses to start. A file
+link already visible under a parent directory bind is skipped.
+Directory symbolic links are always followed the same way. Overlay modes
+cannot be used on a file symlink. A bind table may set symlink =
+"follow" | "preserve" | "error" to override the global default.
+
 network: Global network settings (mode, backend, policy, allow, deny,
 allow_presets, deny_presets). backend is pasta (default) or slirp4netns
 (alias slirp) and selects the filter-mode userspace helper; there is no
@@ -161,7 +172,12 @@ bind), "tmp-overlay" (writable via ephemeral overlayfs; host source unchanged),
 "overlay" (writable via overlayfs with a persistent upper under
 $XDG_CACHE_HOME/buddelkiste/overlays/<hash-of-source>), or
 "overlay:<path>" (explicit persistent upper; <path> may use $VAR / ${VAR}).
-Bind paths, glob patterns, and git work-tree paths may use $VAR or ${VAR}.
+A file that is a symbolic link follows bind_symlinks (or a per-table
+"symlink" key). `bk info` lists the mounts after follow/skip, and
+`bk run --debug` logs each remap. Set bind_symlinks = "preserve" on a
+feature table (or symlink = "preserve" on a bind) to avoid pulling
+referents. Bind paths, glob patterns, and git work-tree paths may
+use $VAR or ${VAR}.
 
 envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
@@ -253,6 +269,7 @@ needs prune first.
 \b
   # shims = false  # disable PATH shims globally (per-entry shim=true still wins)
   # bind_conflicts = "error"  # or "stronger" (keep rw) / "weaker" (keep ro)
+  # bind_symlinks = "follow"  # or "preserve" / "error" (file symlinks only)
 
 \b
   [[binds]]
@@ -292,7 +309,14 @@ keys, enter; space toggles features, typing filters them). Non-interactively
 it exits with an error instead.
 """
 
-from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
+from buddelkiste.binds import (
+    ROBindConfig,
+    RWBindConfig,
+    bind_config,
+    format_resolved_bind,
+    get_bind_args,
+    log_bind_symlink_events,
+)
 from buddelkiste.conflicts import check_launch_conflicts
 from buddelkiste.debuglog import apply_debug_log_env
 from buddelkiste.docker_instance import STORAGE_DRIVERS
@@ -532,7 +556,8 @@ def run(
         allow_presets=net_allow_preset,
         deny_presets=net_deny_preset,
     )
-    binds = get_binds(config, enabled)
+    binds, symlink_events = resolve_sandbox_binds(config, enabled)
+    log_bind_symlink_events(symlink_events)
     env_args = get_env_args(config, enabled)
 
     bind_args = get_bind_args(binds)
@@ -1140,11 +1165,12 @@ def effective_config(
     if isinstance(network, dict) and isinstance(network.get("presets"), dict):
         network_table["presets"] = dict(network["presets"])
 
-    from buddelkiste.conflicts import bind_conflict_policy
+    from buddelkiste.conflicts import bind_conflict_policy, bind_symlink_policy
 
     merged: dict = {
         "shims": global_shims_enabled(config),
         "bind_conflicts": bind_conflict_policy(config),
+        "bind_symlinks": bind_symlink_policy(config),
         "features": {name: bool(enabled.get(name)) for name in feature_names(registry)},
         "network": network_table,
     }
@@ -1159,7 +1185,11 @@ def effective_config(
         }
 
     for key, value in config.items():
-        if key in _PASSTHROUGH_SKIP or key in {"shims", "bind_conflicts"}:
+        if key in _PASSTHROUGH_SKIP or key in {
+            "shims",
+            "bind_conflicts",
+            "bind_symlinks",
+        }:
             continue
         merged[key] = value
     return merged
@@ -1189,6 +1219,7 @@ def format_effective_config(
 _INFO_SKIP = frozenset(
     {
         "bind_conflicts",
+        "bind_symlinks",
         "binds",
         "dbus_proxy",
         "envvars",
@@ -1225,6 +1256,7 @@ def format_active_info(
     lines.append("")
     lines.append(f"shims: {_info_inline(merged.get('shims', True))}")
     lines.append(f"bind_conflicts: {_info_inline(merged.get('bind_conflicts', 'error'))}")
+    lines.append(f"bind_symlinks: {_info_inline(merged.get('bind_symlinks', 'follow'))}")
 
     features = merged.get("features")
     enabled = (
@@ -1264,6 +1296,13 @@ def format_active_info(
         lines.append("")
         _append_info_list(lines, "binds", [_info_bind_item(item) for item in binds])
 
+    feature_map = (
+        {str(name): bool(on) for name, on in features.items()}
+        if isinstance(features, Mapping)
+        else None
+    )
+    _append_resolved_binds_info(lines, config, enabled=feature_map, cwd=here)
+
     envvars = merged.get("envvars")
     if isinstance(envvars, list) and envvars:
         lines.append("")
@@ -1295,6 +1334,34 @@ def _info_bind_item(item: object) -> str:
     if target:
         return f"{source} -> {target} ({mode})"
     return f"{source} ({mode})"
+
+
+def _append_resolved_binds_info(
+    lines: list[str],
+    config: dict,
+    *,
+    enabled: dict[str, bool] | None,
+    cwd: Path,
+) -> None:
+    try:
+        resolved, events = resolve_sandbox_binds(config, enabled, cwd=cwd)
+    except (click.ClickException, OSError, TypeError, ValueError) as exc:
+        lines.append("")
+        lines.append(f"resolved binds: (unavailable: {exc})")
+        return
+    lines.append("")
+    _append_info_list(
+        lines,
+        "resolved binds",
+        [format_resolved_bind(bind) for bind in resolved],
+    )
+    if events:
+        lines.append("")
+        _append_info_list(
+            lines,
+            "bind_symlinks notes",
+            [event.describe() for event in events],
+        )
 
 
 def _info_envvar_item(item: object) -> str:
@@ -1437,27 +1504,48 @@ def _emit_toml_table(
             _emit_toml_table(lines, item, header=())
 
 
+def resolve_sandbox_binds(
+    config: dict,
+    enabled: dict[str, bool] | None = None,
+    *,
+    cwd: Path | None = None,
+) -> tuple[list, list]:
+    """Return ``(binds, bind_symlink_events)`` after follow / conflict resolution."""
+    from buddelkiste.binds import apply_bind_symlinks, set_bind_origin
+    from buddelkiste.conflicts import (
+        bind_conflict_policy,
+        bind_symlink_policy,
+        resolve_bind_conflicts,
+    )
+
+    if enabled is None:
+        enabled = resolve_features(config, cwd=cwd)
+    binds = feature_binds(enabled, config)
+    for index, bind_params in enumerate(config.get("binds", ())):
+        for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
+            src = Path(bind.source)
+            if not src.exists() and not src.is_symlink():
+                raise FileNotFoundError(bind.source)
+            binds.append(set_bind_origin(bind, f"binds[{index}]"))
+    project = lookup_project_config(config, cwd=cwd)
+    if project is not None:
+        root, _table = project
+        binds.append(set_bind_origin(bind_config(root, mode="rw"), "project"))
+    try:
+        binds, events = apply_bind_symlinks(binds, bind_symlink_policy(config))
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    return resolve_bind_conflicts(binds, bind_conflict_policy(config)), events
+
+
 def get_binds(
     config: dict,
     enabled: dict[str, bool] | None = None,
     *,
     cwd: Path | None = None,
 ) -> list:
-    if enabled is None:
-        enabled = resolve_features(config, cwd=cwd)
-    binds = feature_binds(enabled, config)
-    for index, bind_params in enumerate(config.get("binds", ())):
-        for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
-            if not Path(bind.source).exists():
-                raise FileNotFoundError(bind.source)
-            binds.append(bind)
-    project = lookup_project_config(config, cwd=cwd)
-    if project is not None:
-        root, _table = project
-        binds.append(bind_config(root, mode="rw"))
-    from buddelkiste.conflicts import bind_conflict_policy, resolve_bind_conflicts
-
-    return resolve_bind_conflicts(binds, bind_conflict_policy(config))
+    binds, _events = resolve_sandbox_binds(config, enabled, cwd=cwd)
+    return binds
 
 
 def config_path() -> Path:
@@ -1646,6 +1734,7 @@ from buddelkiste.binds import (
     BasicBindConfig,
     DevBindConfig,
     OverlayBindConfig,
+    SymlinkConfig,
     Tmpfs,
     TmpOverlayBindConfig,
 )
@@ -1659,6 +1748,7 @@ __all__ = [
     "ROBindConfig",
     "RWBindConfig",
     "SshAgent",
+    "SymlinkConfig",
     "TmpOverlayBindConfig",
     "Tmpfs",
     "add_bind_to_config",
@@ -1683,5 +1773,6 @@ __all__ = [
     "resolve_features",
     "resolve_launch_command",
     "resolve_network",
+    "resolve_sandbox_binds",
     "run",
 ]

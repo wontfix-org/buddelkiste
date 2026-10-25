@@ -5,11 +5,12 @@ from pathlib import Path
 import click
 import pytest
 
-from buddelkiste.binds import ROBindConfig, RWBindConfig
+from buddelkiste.binds import ROBindConfig, RWBindConfig, SymlinkConfig
 from buddelkiste.conflicts import (
     EnvClaim,
     MountClaim,
     bind_conflict_policy,
+    bind_symlink_policy,
     check_feature_mutex,
     check_launch_conflicts,
     claims_from_bind,
@@ -44,6 +45,14 @@ def test_bind_conflict_policy_default_and_values() -> None:
         bind_conflict_policy({"bind_conflicts": "prompt"})
     with pytest.raises(click.ClickException, match="bind_conflicts"):
         bind_conflict_policy({"bind_conflicts": True})
+
+
+def test_bind_symlink_policy_default_and_values() -> None:
+    assert bind_symlink_policy({}) == "follow"
+    assert bind_symlink_policy(None) == "follow"
+    assert bind_symlink_policy({"bind_symlinks": "Preserve"}) == "preserve"
+    with pytest.raises(click.ClickException, match="bind_symlinks"):
+        bind_symlink_policy({"bind_symlinks": "copy"})
 
 
 def test_identical_mount_claims_are_not_conflicts() -> None:
@@ -325,6 +334,26 @@ def test_check_launch_conflicts_ro_rw_errors_by_default(
     enabled = {name: False for name in FEATURE_NAMES}
     with pytest.raises(click.ClickException, match=str(path)):
         check_launch_conflicts(enabled=enabled, config=config)
+
+
+def test_claims_from_bind_symlink() -> None:
+    claims = claims_from_bind(SymlinkConfig("real.txt", "/tmp/link.txt"), "t")
+    assert claims == [
+        MountClaim("/tmp/link.txt", "symlink", "real.txt", "t"),
+    ]
+
+
+def test_claims_from_bwrap_args_symlink() -> None:
+    from buddelkiste.conflicts import claims_from_bwrap_args
+
+    claims = list(
+        claims_from_bwrap_args(
+            ["--symlink", "../other", "/mnt/link", "--ro-bind", "/a", "/b"],
+            "setup",
+        )
+    )
+    assert claims[0] == MountClaim("/mnt/link", "symlink", "../other", "setup")
+    assert claims[1].kind == "ro-bind"
 
 
 def test_claims_from_bind_skips_missing_ro(tmp_path: Path) -> None:

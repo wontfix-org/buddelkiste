@@ -4,6 +4,17 @@ from pathlib import Path
 
 import pytest
 
+from buddelkiste.binds import (
+    BindSymlinkEvent,
+    OverlayBindConfig,
+    SymlinkConfig,
+    apply_bind_symlinks,
+    apply_one_bind_symlink,
+    is_file_symlink,
+    log_bind_symlink_events,
+    normalize_bind_symlinks,
+    referent_is_reserved,
+)
 from buddelkiste.cli import (
     DevBindConfig,
     ROBindConfig,
@@ -11,6 +22,7 @@ from buddelkiste.cli import (
     Tmpfs,
     get_bind_args,
     get_binds,
+    resolve_sandbox_binds,
 )
 from buddelkiste.features import FEATURE_NAMES, base_binds, feature_binds
 from tests.conftest import init_git_index, needs_git
@@ -31,6 +43,15 @@ def test_ro_bind_custom_target(tmp_path: Path) -> None:
     src.mkdir()
     target = "/mnt/src"
     assert list(ROBindConfig(src, target)) == ["--ro-bind", str(src), target]
+
+
+def test_rw_bind_does_not_replace_dangling_symlink(tmp_path: Path) -> None:
+    link = tmp_path / "dangling"
+    link.symlink_to(tmp_path / "missing")
+    bind = RWBindConfig(link)
+    assert link.is_symlink()
+    assert not link.exists()
+    assert list(bind) == []
 
 
 def test_rw_bind_creates_missing_source(tmp_path: Path) -> None:
@@ -227,6 +248,325 @@ def test_get_binds_keeps_different_targets(
     )
     matched = [bind for bind in binds if getattr(bind, "source", None) == str(extra)]
     assert len(matched) == 2
+
+
+def test_normalize_bind_symlinks() -> None:
+    assert normalize_bind_symlinks("Follow") == "follow"
+    assert normalize_bind_symlinks("preserve") == "preserve"
+    with pytest.raises(ValueError, match="bind_symlinks"):
+        normalize_bind_symlinks("copy")
+    with pytest.raises(TypeError, match="bind_symlinks"):
+        normalize_bind_symlinks(True)
+
+
+def test_is_file_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    file_link = tmp_path / "file-link"
+    file_link.symlink_to(real)
+    dir_link = tmp_path / "dir-link"
+    dir_link.symlink_to(tmp_path)
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "missing")
+    assert is_file_symlink(file_link) is True
+    assert is_file_symlink(dangling) is True
+    assert is_file_symlink(dir_link) is False
+    assert is_file_symlink(real) is False
+    assert is_file_symlink(tmp_path) is False
+
+
+def test_apply_bind_symlinks_preserve_uses_link_text(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to("real.txt")
+    rewritten = apply_one_bind_symlink(ROBindConfig(link), "preserve")
+    assert len(rewritten) == 1
+    assert isinstance(rewritten[0], SymlinkConfig)
+    assert rewritten[0].source == "real.txt"
+    assert rewritten[0].target == str(link)
+    assert list(rewritten[0]) == ["--symlink", "real.txt", str(link)]
+
+
+def test_apply_bind_symlinks_follow_binds_referent(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    rewritten = apply_one_bind_symlink(ROBindConfig(link), "follow")
+    assert [list(item) for item in rewritten] == [
+        ["--ro-bind", str(real.resolve()), str(real.resolve())],
+        ["--symlink", str(real), str(link)],
+    ]
+
+
+def test_apply_bind_symlinks_error(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    with pytest.raises(ValueError, match="symbolic link"):
+        apply_one_bind_symlink(ROBindConfig(link), "error")
+
+
+def test_apply_bind_symlinks_directory_link_not_mounted_on_dest(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    link = tmp_path / "dir-link"
+    link.symlink_to(real)
+    rewritten = apply_one_bind_symlink(ROBindConfig(link), "preserve")
+    assert [list(item) for item in rewritten] == [
+        ["--ro-bind", str(real.resolve()), str(real.resolve())],
+        ["--symlink", str(real), str(link)],
+    ]
+
+
+def test_apply_bind_symlinks_rejects_overlay_on_file_link(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    upper = tmp_path / "upper"
+    bind = OverlayBindConfig(link, upper=upper)
+    with pytest.raises(ValueError, match="overlay"):
+        apply_one_bind_symlink(bind, "follow")
+
+
+def test_apply_bind_symlinks_follow_does_not_ro_bind_dev_null(
+    tmp_path: Path,
+) -> None:
+    link = tmp_path / "discard"
+    link.symlink_to("/dev/null")
+    rewritten, events = apply_bind_symlinks(
+        [("--dev", "/dev"), ROBindConfig(link)],
+        "follow",
+    )
+    args = get_bind_args(rewritten)
+    triples = [(args[i], args[i + 1], args[i + 2]) for i in range(len(args) - 2)]
+    assert ("--dev", "/dev") in [(args[i], args[i + 1]) for i in range(len(args) - 1)]
+    assert ("--ro-bind", "/dev/null", "/dev/null") not in triples
+    assert ("--symlink", "/dev/null", str(link)) in triples
+    assert [event.action for event in events] == ["follow", "skip-covered"]
+    assert events[0].referent == "/dev/null"
+    assert events[1].covered_by == "--dev /dev"
+    assert events[1].dest == "/dev/null"
+
+
+def test_apply_bind_symlinks_keeps_dev_bind_under_dev() -> None:
+    rewritten, events = apply_bind_symlinks(
+        [("--dev", "/dev"), DevBindConfig("/dev/null")],
+        "follow",
+    )
+    assert any(isinstance(bind, DevBindConfig) for bind in rewritten)
+    assert events == []
+
+
+def test_apply_bind_symlinks_skips_file_link_under_parent_dir(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "local"
+    parent.mkdir()
+    real = parent / "gtk-dark.css"
+    real.write_text("x", encoding="utf-8")
+    link = parent / "gtk.css"
+    link.symlink_to(real)
+    rewritten, events = apply_bind_symlinks(
+        [ROBindConfig(parent), ROBindConfig(link)],
+        "follow",
+    )
+    assert [list(item) for item in rewritten] == [
+        ["--ro-bind", str(parent), str(parent)],
+    ]
+    assert [event.action for event in events] == [
+        "follow",
+        "skip-covered",
+        "skip-covered",
+    ]
+    assert events[0].referent == str(real.resolve())
+    assert events[1].covered_by == str(parent)
+    assert events[2].covered_by == str(parent)
+
+
+def test_apply_bind_symlinks_preserve_dangling(tmp_path: Path) -> None:
+    link = tmp_path / "dangling"
+    link.symlink_to("missing.txt")
+    rewritten, events = apply_bind_symlinks([ROBindConfig(link)], "preserve")
+    assert len(rewritten) == 1
+    assert isinstance(rewritten[0], SymlinkConfig)
+    assert rewritten[0].source == "missing.txt"
+    assert [event.action for event in events] == ["preserve"]
+
+
+def test_apply_bind_symlinks_follow_emits_event(tmp_path: Path) -> None:
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    bind = ROBindConfig(link, origin="binds[0]")
+    rewritten, events = apply_bind_symlinks([bind], "follow")
+    assert [list(item) for item in rewritten] == [
+        ["--ro-bind", str(real.resolve()), str(real.resolve())],
+        ["--symlink", str(real), str(link)],
+    ]
+    assert events == [
+        BindSymlinkEvent(
+            action="follow",
+            source=str(link),
+            dest=str(link),
+            referent=str(real.resolve()),
+            origin="binds[0]",
+        )
+    ]
+    note = events[0].describe()
+    assert "bind_symlinks follow (binds[0]):" in note
+    assert str(link) in note
+    assert str(real.resolve()) in note
+
+
+def test_referent_is_reserved() -> None:
+    assert referent_is_reserved("/dev/null") is True
+    assert referent_is_reserved("/proc/self") is True
+    assert referent_is_reserved("/dev") is True
+    assert referent_is_reserved("/home/me/file") is False
+    assert referent_is_reserved(None) is False
+
+
+def test_log_bind_symlink_events_warns_once_for_dev(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events = [
+        BindSymlinkEvent(
+            action="follow",
+            source="/tmp/discard",
+            dest="/tmp/discard",
+            referent="/dev/null",
+        ),
+        BindSymlinkEvent(
+            action="skip-covered",
+            source="/tmp/discard",
+            dest="/dev/null",
+            referent="/dev/null",
+            covered_by="--dev /dev",
+        ),
+    ]
+    with caplog.at_level("DEBUG", logger="buddelkiste"):
+        log_bind_symlink_events(events)
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    debugs = [record for record in caplog.records if record.levelname == "DEBUG"]
+    assert len(warnings) == 1
+    assert "/dev/null" in warnings[0].getMessage()
+    assert len(debugs) == 2
+
+
+def test_get_binds_follow_file_symlink(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    binds = get_binds(
+        {"binds": [{"source": str(link), "mode": "ro"}]},
+        {name: False for name in FEATURE_NAMES},
+    )
+    args = get_bind_args(binds)
+    real_s = str(real.resolve())
+    assert ("--ro-bind", real_s, real_s) in [
+        (args[i], args[i + 1], args[i + 2]) for i in range(len(args) - 2)
+    ]
+    assert ("--symlink", str(real), str(link)) in [
+        (args[i], args[i + 1], args[i + 2]) for i in range(len(args) - 2)
+    ]
+    assert ("--ro-bind", str(link), str(link)) not in [
+        (args[i], args[i + 1], args[i + 2]) for i in range(len(args) - 2)
+    ]
+    assert any(
+        getattr(bind, "origin", None) == "binds[0]"
+        and getattr(bind, "source", None) == real_s
+        for bind in binds
+    )
+    _resolved, events = resolve_sandbox_binds(
+        {"binds": [{"source": str(link), "mode": "ro"}]},
+        {name: False for name in FEATURE_NAMES},
+    )
+    assert events
+    assert events[0].action == "follow"
+    assert events[0].origin == "binds[0]"
+    assert events[0].referent == real_s
+
+
+def test_get_binds_preserve_file_symlink(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to("real.txt")
+    binds = get_binds(
+        {
+            "bind_symlinks": "preserve",
+            "binds": [{"source": str(link), "mode": "ro"}],
+        },
+        {name: False for name in FEATURE_NAMES},
+    )
+    matched = [
+        bind
+        for bind in binds
+        if isinstance(bind, SymlinkConfig) and bind.target == str(link)
+    ]
+    assert len(matched) == 1
+    assert list(matched[0]) == ["--symlink", "real.txt", str(link)]
+
+
+def test_get_binds_per_bind_symlink_override(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to("real.txt")
+    binds = get_binds(
+        {
+            "bind_symlinks": "follow",
+            "binds": [{"source": str(link), "mode": "ro", "symlink": "preserve"}],
+        },
+        {name: False for name in FEATURE_NAMES},
+    )
+    matched = [
+        bind
+        for bind in binds
+        if isinstance(bind, SymlinkConfig) and bind.target == str(link)
+    ]
+    assert len(matched) == 1
+
+
+def test_get_binds_symlink_error(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import click
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    with pytest.raises(click.ClickException, match="symbolic link"):
+        get_binds(
+            {
+                "bind_symlinks": "error",
+                "binds": [{"source": str(link), "mode": "ro"}],
+            },
+            {name: False for name in FEATURE_NAMES},
+        )
 
 
 def test_get_binds_missing_source_raises(

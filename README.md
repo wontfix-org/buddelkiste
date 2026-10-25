@@ -97,7 +97,9 @@ Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
 active `[[projects]]` `features` → `--feature` / `--no-feature`.
 `bk info` (optional executable name) prints that merged view in a
-human-readable form. `bk config show` dumps the same tables as TOML.
+human-readable form, including the mounts after symlink follow/skip.
+`bk run --debug` logs each remap. `bk config show` dumps the same
+tables as TOML.
 
 ### D-Bus proxy
 
@@ -209,6 +211,7 @@ images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
 
 # shims = false  # disable PATH shims globally (per-entry shim = true still wins)
 # bind_conflicts = "error"  # or "stronger" (keep rw) / "weaker" (keep ro)
+# bind_symlinks = "follow"  # or "preserve" / "error" (file symlinks only)
 
 [[binds]]
 source = "/path/to/directory"
@@ -273,6 +276,21 @@ If two binds claim the same path and differ only by `ro` vs `rw`,
 `bind_conflicts` chooses what happens: `error` (default) refuses to start,
 `stronger` keeps the read-write bind, and `weaker` keeps the read-only bind.
 Other mismatches (different sources, overlay vs bind, tmpfs) still fail.
+
+If a bind *source* is a symbolic link to a file (including a dangling link),
+`bind_symlinks` chooses what happens:
+
+| Value | Meaning |
+|-------|---------|
+| `follow` (default) | bind the referent at its real path and recreate the link (`--symlink`); never `--bind` onto the symlink dest |
+| `preserve` | recreate the link with `--symlink` using the stored text (no leak of an unbound target) |
+| `error` | refuse to start |
+
+Directory symbolic links are always followed. Overlay modes cannot be used on
+a file symlink. A bind table may set `symlink = "follow"|"preserve"|"error"`
+to override the global default (useful on `git` / `glob` tables). Set
+`bind_symlinks = "preserve"` on a feature table to avoid pulling referents.
+`bk info` lists resolved mounts and follow remaps; `bk run --debug` logs them.
 
 The current working directory must be a configured project: the working
 directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`

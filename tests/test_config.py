@@ -110,6 +110,7 @@ def test_effective_config_applies_layers(tmp_path: Path) -> None:
     }
     merged = effective_config(config, executable="python", cwd=repo)
     assert merged["bind_conflicts"] == "weaker"
+    assert merged["bind_symlinks"] == "follow"
     assert merged["features"]["user"] is True
     assert merged["features"]["git"] is True
     assert merged["features"]["python"] is True
@@ -151,6 +152,7 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     assert "executable: python" in text
     assert "args (1):\n  - -u\n" in text
     assert "bind_conflicts: error" in text
+    assert "bind_symlinks: follow" in text
     assert "  - user\n" in text
     assert "  - git\n" in text
     assert "  - python\n" in text
@@ -164,6 +166,33 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     assert "docker_proxy:" in text
     assert "  - alpine:3.20\n" in text
     assert "Zig toolchain cache" not in text
+
+
+def test_format_active_info_lists_resolved_binds_and_notes(
+    tmp_path: Path, runtime_dir: Path
+) -> None:
+    parent = tmp_path / "local"
+    parent.mkdir()
+    real = parent / "gtk-dark.css"
+    real.write_text("x", encoding="utf-8")
+    link = parent / "gtk.css"
+    link.symlink_to(real)
+    config = {
+        "features": [],
+        "binds": [
+            {"source": str(parent), "mode": "ro"},
+            {"source": str(link), "mode": "ro"},
+        ],
+    }
+    text = format_active_info(config, cwd=tmp_path)
+    assert "resolved binds" in text
+    assert f"  - {parent} (ro)\n" in text
+    assert "bind_symlinks notes" in text
+    assert "bind_symlinks follow" in text
+    assert str(link) in text
+    assert str(real.resolve()) in text
+    assert "skip" in text
+    assert str(parent) in text
 
 
 def test_format_toml_document_roundtrip() -> None:

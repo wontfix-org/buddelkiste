@@ -369,6 +369,23 @@ def test_binds_from_spec_requires_source_or_glob() -> None:
         binds_from_spec({"mode": "ro"})
 
 
+def test_binds_from_spec_rejects_bad_symlink(tmp_path: Path) -> None:
+    path = tmp_path / "x"
+    path.write_text("x", encoding="utf-8")
+    with pytest.raises(click.ClickException, match="symlink"):
+        binds_from_spec({"source": str(path), "symlink": "copy"})
+
+
+def test_binds_from_spec_sets_symlink_override(tmp_path: Path) -> None:
+    path = tmp_path / "x"
+    path.write_text("x", encoding="utf-8")
+    binds = binds_from_spec(
+        {"source": str(path), "mode": "ro", "symlink": "preserve"},
+        where="binds[0]",
+    )
+    assert binds[0].symlink == "preserve"
+
+
 def test_toml_feature_glob_binds(tmp_path: Path) -> None:
     one = tmp_path / "one.cfg"
     two = tmp_path / "two.cfg"
@@ -398,6 +415,30 @@ def test_binds_from_spec_git_matches_tracked_files_only(tmp_path: Path) -> None:
     sources = {bind.source for bind in binds}
     assert sources == {str(repo / "a.txt"), str(repo / "src" / "nested.txt")}
     assert all(bind.source == bind.target for bind in binds)
+
+
+@needs_git
+def test_binds_from_spec_git_includes_file_symlink(tmp_path: Path) -> None:
+    import os
+    import subprocess
+
+    repo = init_git_index(tmp_path / "repo", {"real.txt": "x"})
+    link = repo / "link.txt"
+    link.symlink_to("real.txt")
+    env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(name, None)
+    subprocess.run(
+        ["git", "add", "--", "link.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    binds = binds_from_spec({"git": str(repo), "mode": "ro"}, where="binds[0]")
+    sources = {bind.source for bind in binds}
+    assert str(link) in sources
+    assert str(repo / "real.txt") in sources
 
 
 @needs_git
@@ -567,6 +608,16 @@ def test_feature_binds_include_only_enabled_topics(
     assert str(home / ".cursor") not in sources
     assert str(home / ".cache") not in sources
     assert "/usr" in sources  # base
+    assert any(
+        getattr(bind, "source", None) == "/usr"
+        and getattr(bind, "origin", None) == "base"
+        for bind in binds
+    )
+    assert any(
+        getattr(bind, "source", None) == str(home / ".pip")
+        and getattr(bind, "origin", None) == "feature python"
+        for bind in binds
+    )
 
 
 def test_base_binds_always_present(

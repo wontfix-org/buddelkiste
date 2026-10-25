@@ -11,10 +11,14 @@ from pathlib import Path
 import click
 
 from buddelkiste.binds import (
+    DEFAULT_BIND_SYMLINKS,
     BasicBindConfig,
     OverlayBindConfig,
+    SymlinkConfig,
     Tmpfs,
     TmpOverlayBindConfig,
+    apply_one_bind_symlink,
+    normalize_bind_symlinks,
 )
 from buddelkiste.features import (
     BASE_ENV_VARS,
@@ -91,6 +95,16 @@ def bind_conflict_policy(config: Mapping | None = None) -> str:
     if not config or "bind_conflicts" not in config:
         return DEFAULT_BIND_CONFLICTS
     return normalize_bind_conflicts(config["bind_conflicts"])
+
+
+def bind_symlink_policy(config: Mapping | None = None) -> str:
+    """Return the global ``bind_symlinks`` policy (default ``follow``)."""
+    if not config or "bind_symlinks" not in config:
+        return DEFAULT_BIND_SYMLINKS
+    try:
+        return normalize_bind_symlinks(config["bind_symlinks"])
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _bind_mode_rank(kind: str) -> int | None:
@@ -195,6 +209,16 @@ def claims_from_bind(bind: object, origin: str) -> list[MountClaim]:
     """Return mount claims emitted by a bind object (if it will be applied)."""
     from buddelkiste.binds import RWBindConfig
 
+    if isinstance(bind, SymlinkConfig):
+        return [
+            MountClaim(
+                target=_norm_target(bind.target),
+                kind="symlink",
+                source=os.fspath(bind.source),
+                origin=origin,
+            )
+        ]
+
     if isinstance(bind, Tmpfs):
         return [
             MountClaim(
@@ -242,6 +266,15 @@ def claims_from_bwrap_args(
             yield MountClaim(
                 target=_norm_target(args[i + 2]),
                 kind=_BIND_FLAG_KIND[arg],
+                source=os.fspath(args[i + 1]),
+                origin=origin,
+            )
+            i += 3
+            continue
+        if arg == "--symlink" and i + 2 < len(args):
+            yield MountClaim(
+                target=_norm_target(args[i + 2]),
+                kind="symlink",
                 source=os.fspath(args[i + 1]),
                 origin=origin,
             )
@@ -321,15 +354,27 @@ def iter_bind_claims(
     """Yield mount claims for base + enabled features + config binds."""
     from buddelkiste.features import base_binds
 
+    policy = bind_symlink_policy(config)
+
+    def _claims(bind: object, origin: str) -> list[MountClaim]:
+        try:
+            rewritten = apply_one_bind_symlink(bind, policy)
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        claims: list[MountClaim] = []
+        for piece in rewritten:
+            claims.extend(claims_from_bind(piece, origin))
+        return claims
+
     registry = load_feature_registry(dict(config))
     for bind in base_binds():
-        yield from claims_from_bind(bind, "base")
+        yield from _claims(bind, "base")
     for name in enabled_feature_names(dict(enabled), registry):
         for bind in registry[name].binds():
-            yield from claims_from_bind(bind, f"feature {name!r}")
+            yield from _claims(bind, f"feature {name!r}")
     for index, bind_params in enumerate(config.get("binds", ())):
         for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
-            yield from claims_from_bind(bind, f"config binds[{index}]")
+            yield from _claims(bind, f"config binds[{index}]")
 
 
 def iter_env_claims(
