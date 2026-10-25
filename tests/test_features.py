@@ -33,6 +33,7 @@ from buddelkiste.features import (
     user_binds,
     xdg_open_binds,
 )
+from tests.conftest import init_git_index, needs_git
 
 
 def test_feature_catalog_is_topic_oriented() -> None:
@@ -364,7 +365,7 @@ def test_binds_from_spec_rejects_non_bool_nullglob(tmp_path: Path) -> None:
 
 
 def test_binds_from_spec_requires_source_or_glob() -> None:
-    with pytest.raises(click.ClickException, match="source' or 'glob"):
+    with pytest.raises(click.ClickException, match="'source', 'glob', or 'git'"):
         binds_from_spec({"mode": "ro"})
 
 
@@ -383,6 +384,108 @@ def test_toml_feature_glob_binds(tmp_path: Path) -> None:
     registry = load_feature_registry(config)
     sources = {bind.source for bind in registry["cfgs"].binds()}
     assert sources == {str(one), str(two)}
+
+
+@needs_git
+def test_binds_from_spec_git_matches_tracked_files_only(tmp_path: Path) -> None:
+    repo = init_git_index(
+        tmp_path / "repo",
+        {"a.txt": "a", "src/nested.txt": "n"},
+    )
+    (repo / "untracked.txt").write_text("nope", encoding="utf-8")
+
+    binds = binds_from_spec({"git": str(repo), "mode": "rw"}, where="binds[0]")
+    sources = {bind.source for bind in binds}
+    assert sources == {str(repo / "a.txt"), str(repo / "src" / "nested.txt")}
+    assert all(bind.source == bind.target for bind in binds)
+
+
+@needs_git
+def test_binds_from_spec_git_target_uses_relpath(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "repo", {"src/nested.txt": "n"})
+    binds = binds_from_spec(
+        {"git": str(repo), "target": "/mnt/extra", "mode": "ro"},
+        where="binds[0]",
+    )
+    assert len(binds) == 1
+    assert binds[0].source == str(repo / "src" / "nested.txt")
+    assert binds[0].target == "/mnt/extra/src/nested.txt"
+
+
+@needs_git
+def test_binds_from_spec_git_expands_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = init_git_index(tmp_path / "repo", {"keep.txt": "x"})
+    monkeypatch.setenv("BIND_ROOT", str(repo))
+    binds = binds_from_spec({"git": "$BIND_ROOT"}, where="binds[0]")
+    assert [bind.source for bind in binds] == [str(repo / "keep.txt")]
+
+
+@needs_git
+def test_binds_from_spec_git_nullglob_empty(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "empty")
+    assert (
+        binds_from_spec(
+            {"git": str(repo), "nullglob": True},
+            where="binds[0]",
+        )
+        == []
+    )
+
+
+@needs_git
+def test_binds_from_spec_empty_git_errors(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "empty")
+    with pytest.raises(click.ClickException, match="matched nothing"):
+        binds_from_spec({"git": str(repo)}, where="binds[0]")
+
+
+@needs_git
+def test_binds_from_spec_git_not_a_repository(tmp_path: Path) -> None:
+    with pytest.raises(click.ClickException, match="not a git repository"):
+        binds_from_spec({"git": str(tmp_path / "missing")}, where="binds[0]")
+
+
+@needs_git
+def test_binds_from_spec_rejects_source_and_git(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "repo", {"a.txt": "a"})
+    with pytest.raises(click.ClickException, match="both 'source' and 'git'"):
+        binds_from_spec({"source": str(repo / "a.txt"), "git": str(repo)})
+
+
+@needs_git
+def test_binds_from_spec_rejects_glob_and_git(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "repo", {"a.txt": "a"})
+    with pytest.raises(click.ClickException, match="both 'glob' and 'git'"):
+        binds_from_spec({"glob": str(repo / "*"), "git": str(repo)})
+
+
+@needs_git
+def test_binds_from_spec_git_ignores_git_dir_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = init_git_index(tmp_path / "repo", {"keep.txt": "x"})
+    other = init_git_index(tmp_path / "other", {"other.txt": "y"})
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    binds = binds_from_spec({"git": str(repo)}, where="binds[0]")
+    assert [bind.source for bind in binds] == [str(repo / "keep.txt")]
+
+
+@needs_git
+def test_toml_feature_git_binds(tmp_path: Path) -> None:
+    repo = init_git_index(tmp_path / "repo", {"one.cfg": "1", "two.cfg": "2"})
+    (repo / "skip.cfg").write_text("3", encoding="utf-8")
+    config = {
+        "feature": {
+            "cfgs": {
+                "binds": [{"git": str(repo), "mode": "ro"}],
+            }
+        }
+    }
+    registry = load_feature_registry(config)
+    sources = {bind.source for bind in registry["cfgs"].binds()}
+    assert sources == {str(repo / "one.cfg"), str(repo / "two.cfg")}
 
 
 def test_toml_bind_rejects_read_only_key() -> None:

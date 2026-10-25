@@ -13,6 +13,7 @@ from buddelkiste.cli import (
     get_binds,
 )
 from buddelkiste.features import FEATURE_NAMES, base_binds, feature_binds
+from tests.conftest import init_git_index, needs_git
 
 
 def test_ro_bind_iterates_when_source_exists(tmp_path: Path) -> None:
@@ -402,6 +403,104 @@ def test_get_binds_glob_nullglob_allows_empty(
     sources = [bind.source for bind in binds if isinstance(bind, ROBindConfig)]
     assert str(extra) in sources
     assert not any("missing" in source for source in sources)
+
+
+@needs_git
+def test_get_binds_expands_git_with_shared_mode(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    repo = init_git_index(tmp_path / "repo", {"a.txt": "a", "b.txt": "b"})
+    (repo / "untracked.txt").write_text("nope", encoding="utf-8")
+
+    binds = get_binds(
+        {"binds": [{"git": str(repo), "mode": "ro"}]},
+        {n: False for n in FEATURE_NAMES},
+    )
+    expected = {str(repo / "a.txt"), str(repo / "b.txt")}
+    sources = {bind.source for bind in binds if isinstance(bind, ROBindConfig)}
+    assert expected <= sources
+    assert str(repo / "untracked.txt") not in sources
+    matched = [
+        bind
+        for bind in binds
+        if isinstance(bind, ROBindConfig) and bind.source in expected
+    ]
+    assert matched
+    assert all(next(iter(bind)) == "--ro-bind" for bind in matched)
+
+
+@needs_git
+def test_get_binds_git_target_uses_relpath(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    repo = init_git_index(tmp_path / "repo", {"src/one": "1", "two": "2"})
+
+    binds = get_binds(
+        {
+            "binds": [
+                {
+                    "git": str(repo),
+                    "target": "/mnt/extra",
+                    "mode": "ro",
+                }
+            ]
+        },
+        {n: False for n in FEATURE_NAMES},
+    )
+    by_source = {bind.source: bind for bind in binds if isinstance(bind, ROBindConfig)}
+    assert list(by_source[str(repo / "src" / "one")]) == [
+        "--ro-bind",
+        str(repo / "src" / "one"),
+        "/mnt/extra/src/one",
+    ]
+    assert list(by_source[str(repo / "two")]) == [
+        "--ro-bind",
+        str(repo / "two"),
+        "/mnt/extra/two",
+    ]
+
+
+@needs_git
+def test_get_binds_git_nullglob_allows_empty(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    repo = init_git_index(tmp_path / "empty")
+    binds = get_binds(
+        {
+            "binds": [
+                {"git": str(repo), "nullglob": True},
+                {"source": str(extra), "mode": "ro"},
+            ]
+        },
+        {n: False for n in FEATURE_NAMES},
+    )
+    sources = [bind.source for bind in binds if isinstance(bind, ROBindConfig)]
+    assert str(extra) in sources
+    assert not any(str(repo) in source for source in sources)
+
+
+@needs_git
+def test_get_binds_git_empty_match_raises(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import click
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    repo = init_git_index(tmp_path / "empty")
+    with pytest.raises(click.ClickException, match="matched nothing"):
+        get_binds(
+            {"binds": [{"git": str(repo)}]},
+            {n: False for n in FEATURE_NAMES},
+        )
 
 
 def test_get_binds_glob_empty_match_raises(

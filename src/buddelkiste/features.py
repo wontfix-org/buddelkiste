@@ -721,7 +721,9 @@ def _normalize_bind_mode(mode: str, *, where: str) -> str:
     )
 
 
-_BIND_SPEC_KEYS = frozenset({"source", "target", "mode", "glob", "nullglob"})
+_BIND_SPEC_KEYS = frozenset({"source", "target", "mode", "glob", "git", "nullglob"})
+_BIND_SELECTORS = ("source", "glob", "git")
+_GIT_OVERRIDE_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
 
 
 def _bind_from_parts(
@@ -737,15 +739,67 @@ def _bind_from_parts(
         raise click.ClickException(f"{where}: {exc}") from exc
 
 
+def _git_command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in _GIT_OVERRIDE_VARS:
+        env.pop(name, None)
+    return env
+
+
+def _git_tracked_files(repo: str, *, where: str) -> tuple[str, list[str]]:
+    """Return ``(toplevel, existing tracked files)`` for a git work tree."""
+    env = _git_command_env()
+    try:
+        toplevel_proc = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"{where}: git is not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(
+            f"{where}: {repo!r} is not a git repository"
+        ) from exc
+
+    toplevel = toplevel_proc.stdout.strip()
+    try:
+        listed = subprocess.run(
+            ["git", "-C", toplevel, "ls-files", "-z", "--cached"],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"{where}: git is not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(
+            f"{where}: failed to list tracked files in {repo!r}"
+        ) from exc
+
+    paths: list[str] = []
+    for rel in listed.stdout.split(b"\0"):
+        if not rel:
+            continue
+        path = Path(toplevel) / os.fsdecode(rel)
+        if path.exists() and not path.is_dir():
+            paths.append(str(path))
+    return toplevel, sorted(paths)
+
+
 def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
     """Build bind configs from a TOML/config table.
 
-    A table has either ``source`` (one host path) or ``glob`` (a shell-style
-    pattern). Every match is bound with the same ``mode``. ``target`` is
-    optional: with ``source`` it is the mountpoint (default: the host path);
-    with ``glob`` it is a directory and each match is mounted at
-    ``target/<basename>``. ``nullglob`` (with ``glob`` only) allows zero
-    matches; otherwise an empty match is an error.
+    A table has exactly one of ``source`` (one host path), ``glob`` (a
+    shell-style pattern), or ``git`` (a git work tree). Every match is bound
+    with the same ``mode``. ``target`` is optional: with ``source`` it is the
+    mountpoint (default: the host path); with ``glob`` it is a directory and
+    each match is mounted at ``target/<basename>``; with ``git`` it is a
+    directory and each tracked file is mounted at ``target/<relpath>``.
+    ``nullglob`` (with ``glob`` or ``git``) allows zero matches; otherwise an
+    empty match is an error.
     """
     if "read_only" in spec:
         raise click.ClickException(
@@ -759,14 +813,21 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
 
     has_source = "source" in spec
     has_glob = "glob" in spec
-    if has_source and has_glob:
-        raise click.ClickException(f"{where} has both 'source' and 'glob'; use only one")
-    if not has_source and not has_glob:
-        raise click.ClickException(f"{where} missing required key 'source' or 'glob'")
+    has_git = "git" in spec
+    selectors = [key for key in _BIND_SELECTORS if key in spec]
+    if len(selectors) > 1:
+        listed = " and ".join(repr(key) for key in selectors)
+        raise click.ClickException(f"{where} has both {listed}; use only one")
+    if not selectors:
+        raise click.ClickException(
+            f"{where} missing required key 'source', 'glob', or 'git'"
+        )
 
     if "nullglob" in spec:
-        if not has_glob:
-            raise click.ClickException(f"{where} has 'nullglob' without 'glob'")
+        if not has_glob and not has_git:
+            raise click.ClickException(
+                f"{where} has 'nullglob' without 'glob' or 'git'"
+            )
         if not isinstance(spec["nullglob"], bool):
             raise click.ClickException(f"{where}: 'nullglob' must be a boolean")
 
@@ -777,16 +838,34 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
         source = expand_bind_path(str(spec["source"]))
         return [_bind_from_parts(source, target, mode, where=where)]
 
-    pattern = expand_bind_path(str(spec["glob"]))
-    matches = sorted(glob.glob(pattern, recursive=True))
+    if has_glob:
+        pattern = expand_bind_path(str(spec["glob"]))
+        matches = sorted(glob.glob(pattern, recursive=True))
+        if not matches:
+            if spec.get("nullglob", False):
+                return []
+            raise click.ClickException(f"{where}: glob {spec['glob']!r} matched nothing")
+
+        binds = []
+        for match in matches:
+            match_target = None if target is None else str(Path(target) / Path(match).name)
+            binds.append(_bind_from_parts(match, match_target, mode, where=where))
+        return binds
+
+    repo = expand_bind_path(str(spec["git"]))
+    toplevel, matches = _git_tracked_files(repo, where=where)
     if not matches:
         if spec.get("nullglob", False):
             return []
-        raise click.ClickException(f"{where}: glob {spec['glob']!r} matched nothing")
+        raise click.ClickException(f"{where}: git {spec['git']!r} matched nothing")
 
     binds = []
     for match in matches:
-        match_target = None if target is None else str(Path(target) / Path(match).name)
+        if target is None:
+            match_target = None
+        else:
+            rel = Path(match).relative_to(toplevel)
+            match_target = str(Path(target) / rel)
         binds.append(_bind_from_parts(match, match_target, mode, where=where))
     return binds
 
@@ -794,7 +873,7 @@ def binds_from_spec(spec: dict, *, where: str = "bind") -> list:
 def bind_from_spec(spec: dict, *, where: str = "bind"):
     """Build a single bind config from a ``source`` table.
 
-    Glob tables that expand to zero or several binds must use
+    Glob or git tables that expand to zero or several binds must use
     :func:`binds_from_spec`.
     """
     binds = binds_from_spec(spec, where=where)
@@ -848,7 +927,8 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
     for index, item in enumerate(binds_spec):
         if not isinstance(item, dict):
             raise click.ClickException(
-                f"feature.{name}.binds[{index}] must be a table with 'source' or 'glob'"
+                f"feature.{name}.binds[{index}] must be a table with "
+                "'source', 'glob', or 'git'"
             )
 
     conflicts_spec = data.get("conflicts_with", [])

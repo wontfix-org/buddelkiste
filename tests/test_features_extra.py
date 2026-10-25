@@ -40,6 +40,7 @@ from buddelkiste.features import (
     resolve_features,
     ssh_setup,
 )
+from tests.conftest import init_git_index, needs_git
 
 
 def test_runtime_dir_must_be_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -517,6 +518,19 @@ def test_bind_specs_reject_bad_modes_and_require_one_match(tmp_path: Path) -> No
         bind_from_spec({"glob": str(tmp_path / "missing*"), "nullglob": True})
     single = bind_from_spec({"source": str(one), "mode": "rw"})
     assert single.source == str(one)
+
+
+@needs_git
+def test_bind_from_spec_git_requires_exactly_one_match(tmp_path: Path) -> None:
+    many = init_git_index(tmp_path / "many", {"a.txt": "a", "b.txt": "b"})
+    with pytest.raises(click.ClickException, match="got 2"):
+        bind_from_spec({"git": str(many)})
+    empty = init_git_index(tmp_path / "empty")
+    with pytest.raises(click.ClickException, match="got 0"):
+        bind_from_spec({"git": str(empty), "nullglob": True})
+    one = init_git_index(tmp_path / "one", {"only.txt": "x"})
+    single = bind_from_spec({"git": str(one)})
+    assert single.source == str(one / "only.txt")
 
 
 def test_resolve_features_rejects_non_table_spec() -> None:

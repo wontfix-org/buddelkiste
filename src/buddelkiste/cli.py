@@ -104,7 +104,7 @@ or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
 set description, default, env (allowlisted variable names), binds (list of
-source-or-glob/target/mode tables), and conflicts_with (other feature names that must
+source/glob/git/target/mode tables), and conflicts_with (other feature names that must
 not be enabled at the same time). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 Before starting, bk refuses launches with conflicting mounts, conflicting
@@ -140,19 +140,22 @@ allow_presets, deny_presets). backend is pasta (default) or slirp4netns
 fallback to the other binary. Optional [network.presets] defines custom
 named lists used by either allow_presets or deny_presets. See example.
 
-binds: List of additional bind mounts for the sandbox. Each table has either
-"source" (one host path) or "glob" (a shell-style pattern matching files and
-directories), plus optional "target" and "mode". A "glob" entry binds every
-match with the same settings. "nullglob" (boolean, default false) allows a
-glob to match nothing; otherwise an empty match is an error. The "target"
+binds: List of additional bind mounts for the sandbox. Each table has exactly
+one of "source" (one host path), "glob" (a shell-style pattern matching files
+and directories), or "git" (a git work tree; every tracked file is bound),
+plus optional "target" and "mode". A "glob" or "git" entry binds every match
+with the same settings. "nullglob" (boolean, default false) allows a glob or
+git table to match nothing; otherwise an empty match is an error. The "target"
 key is optional: with "source" it is the mountpoint (default: the host path);
-with "glob" it is a directory and each match is mounted at target/<basename>.
+with "glob" it is a directory and each match is mounted at target/<basename>;
+with "git" it is a directory and each file is mounted at
+target/<path-relative-to-the-work-tree>.
 The "mode" key defaults to "ro" (read-only). Other modes: "rw" (read-write
 bind), "tmp-overlay" (writable via ephemeral overlayfs; host source unchanged),
 "overlay" (writable via overlayfs with a persistent upper under
 $XDG_CACHE_HOME/buddelkiste/overlays/<hash-of-source>), or
 "overlay:<path>" (explicit persistent upper; <path> may use $VAR / ${VAR}).
-Bind paths and glob patterns may use $VAR or ${VAR}.
+Bind paths, glob patterns, and git work-tree paths may use $VAR or ${VAR}.
 
 envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
@@ -258,6 +261,11 @@ needs prune first.
   [[binds]]
   glob = "${HOME}/.ssh/id_*"
   nullglob = true
+  mode = "ro"
+
+\b
+  [[binds]]
+  git = "${HOME}/src/other-project"
   mode = "ro"
 
 \b
@@ -1269,7 +1277,7 @@ def _info_inline(value: object) -> str:
 def _info_bind_item(item: object) -> str:
     if not isinstance(item, Mapping):
         return str(item)
-    source = item.get("source") or item.get("glob") or "?"
+    source = item.get("source") or item.get("glob") or item.get("git") or "?"
     mode = item.get("mode", "ro")
     target = item.get("target")
     if target:

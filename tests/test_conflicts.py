@@ -23,6 +23,7 @@ from buddelkiste.features import (
     clear_feature_caches,
     load_feature_registry,
 )
+from tests.conftest import init_git_index, needs_git
 
 
 @pytest.fixture(autouse=True)
@@ -329,3 +330,24 @@ def test_iter_bind_claims_expands_glob(
     sources = {claim.source for claim in claims}
     assert str(one) in sources
     assert str(two) in sources
+
+
+@needs_git
+def test_iter_bind_claims_expands_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    repo = init_git_index(tmp_path / "repo", {"one": "1", "src/two": "2"})
+    (repo / "untracked").write_text("x", encoding="utf-8")
+    enabled = {name: False for name in FEATURE_NAMES}
+    claims = list(
+        iter_bind_claims(
+            {"binds": [{"git": str(repo), "mode": "ro"}]},
+            enabled,
+        )
+    )
+    sources = {claim.source for claim in claims}
+    assert str(repo / "one") in sources
+    assert str(repo / "src" / "two") in sources
+    assert str(repo / "untracked") not in sources

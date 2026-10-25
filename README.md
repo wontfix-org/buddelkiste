@@ -227,6 +227,10 @@ glob = "${HOME}/.ssh/id_*"
 nullglob = true
 mode = "ro"
 
+[[binds]]
+git = "${HOME}/src/other-project"
+mode = "ro"
+
 [[envvars]]
 name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
@@ -256,11 +260,13 @@ Bind `mode` values:
 | `overlay` | overlayfs; upper under `$XDG_CACHE_HOME/buddelkiste/overlays/<sha256(source)>` |
 | `overlay:<path>` | overlayfs with an explicit upper path (`$VAR` / `${VAR}` / `~` ok) |
 
-Paths in `source`, `glob`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
+Paths in `source`, `glob`, `git`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
 A `glob` table binds every matching file or directory with the same `mode`.
-`nullglob = true` allows the pattern to match nothing; the default is to error.
+A `git` table binds every tracked file in that work tree with the same `mode`.
+`nullglob = true` allows a glob or git table to match nothing; the default is to error.
 With `glob`, an optional `target` is a directory and each match is mounted at
-`target/<basename>`.
+`target/<basename>`. With `git`, an optional `target` is a directory and each
+file is mounted at `target/<path-relative-to-the-work-tree>`.
 
 The current working directory must be a configured project: the working
 directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`

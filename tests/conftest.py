@@ -1,11 +1,51 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
+
+_GIT_OVERRIDE_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+def git_on_path() -> bool:
+    return shutil.which("git") is not None
+
+
+needs_git = pytest.mark.skipif(not git_on_path(), reason="git is not installed")
+
+
+def init_git_index(root: Path, files: Mapping[str, str] | None = None) -> Path:
+    """Create a git work tree at ``root`` with ``files`` added to the index."""
+    if not git_on_path():
+        pytest.skip("git is not installed")
+    root.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    for name in _GIT_OVERRIDE_VARS:
+        env.pop(name, None)
+    subprocess.run(
+        ["git", "init"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    for rel, content in (files or {}).items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "--", rel],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+    return root
 
 
 @pytest.fixture

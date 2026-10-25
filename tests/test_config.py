@@ -136,7 +136,10 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
             }
         },
         "projects": [{"path": str(repo), "features": {"rust": True}}],
-        "binds": [{"source": "/tmp", "mode": "ro"}],
+        "binds": [
+            {"source": "/tmp", "mode": "ro"},
+            {"git": "/some/repo", "mode": "ro"},
+        ],
         "envvars": [{"name": "FOO", "value": "bar"}, {"name": "FROM_ENV"}],
         "docker_proxy": {"images": ["alpine:3.20"]},
         "feature": {"zig": {"description": "Zig toolchain cache"}},
@@ -152,6 +155,7 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     assert "  mode: none" in text
     assert "  - org.foo.Bar\n" in text
     assert "  - /tmp (ro)\n" in text
+    assert "  - /some/repo (ro)\n" in text
     assert "  - FOO=bar\n" in text
     assert "  - FROM_ENV (from environment)\n" in text
     assert "docker_proxy:" in text
