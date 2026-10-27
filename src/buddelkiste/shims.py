@@ -375,13 +375,15 @@ def resolve_run_executable(
     bin_dir: Path | None = None,
     path_value: str | None = None,
     cwd: Path | None = None,
+    configured: Path | None = None,
 ) -> str:
     """Resolve ``executable`` for ``bk run``, never selecting a managed shim.
 
-    Bare names walk PATH outside the shim directory (and skip any other
-    managed shim files). An explicit path that is a managed shim is rejected
-    so ``bk run`` cannot nest through a wrapper. Other path-like values are
-    returned unchanged.
+    ``configured`` is the entry's absolute ``path`` and wins over a PATH
+    search for a bare name. Otherwise bare names walk PATH outside the shim
+    directory (and skip any other managed shim files). An explicit path that
+    is a managed shim is rejected so ``bk run`` cannot nest through a wrapper.
+    Other path-like values are returned unchanged.
     """
     path = Path(executable)
     explicit_path = path.is_absolute() or os.sep in executable
@@ -394,6 +396,9 @@ def resolve_run_executable(
                 "or a bare command name"
             )
         return executable
+
+    if configured is not None:
+        return os.fspath(configured)
 
     real = resolve_shim_target(executable, bin_dir=bin_dir, path_value=path_value)
     if real is not None:

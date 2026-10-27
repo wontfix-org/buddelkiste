@@ -17,6 +17,28 @@ def test_resolve_launch_command_uses_args() -> None:
     assert resolve_launch_command(["/bin/echo", "hi"]) == ["/bin/echo", "hi"]
 
 
+def test_resolve_launch_command_prefers_configured_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign_dir = tmp_path / "bin"
+    foreign_dir.mkdir()
+    foreign = foreign_dir / "cursor-agent"
+    foreign.write_text("#!/bin/sh\n", encoding="utf-8")
+    foreign.chmod(0o755)
+    real = tmp_path / "opt" / "cursor-agent"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.setenv("PATH", str(foreign_dir))
+    config = {"executables": {"cursor-agent": {"path": str(real)}}}
+
+    assert resolve_launch_command(["cursor-agent", "--version"], config) == [
+        str(real),
+        "--version",
+    ]
+    assert resolve_launch_command([str(foreign)], config) == [str(foreign)]
+
+
 def test_resolve_launch_command_resolves_bare_name_past_shim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

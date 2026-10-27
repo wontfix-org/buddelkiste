@@ -119,7 +119,8 @@ Each entry may contain a features list or table, a network table, an args list
 of extra arguments appended to the command, a shim boolean (override
 the global shims toggle), and/or path (an absolute executable to run
 instead of searching PATH for the section's file name). ``~`` in path is
-expanded when shims are installed.
+expanded. ``bk run`` uses it for a bare command name; installed shims exec
+that file directly.
 
 projects: List of tables (``[[projects]]``) with a mandatory path. The most
 specific path that covers the current working directory is active: that tree
@@ -342,6 +343,7 @@ from buddelkiste.network import (
 )
 from buddelkiste.shims import (
     check_shims,
+    configured_executable_path,
     global_shims_enabled,
     install_shim_hook,
     install_shims_from_config,
@@ -534,7 +536,7 @@ def run(
     debug_on = debug or debug_file is not None
 
     config = load_config()
-    command = resolve_launch_command(args)
+    command = resolve_launch_command(args, config)
     executable = command_executable(command, args)
     command = append_executable_args(command, config, executable)
     config = ensure_cwd_project(config, executable=executable)
@@ -1684,21 +1686,36 @@ def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequen
     return res
 
 
-def resolve_launch_command(args: list[str]) -> list[str]:
+def _configured_run_path(config: dict | None, executable: str) -> Path | None:
+    """Absolute ``executables.*.path`` for a bare command name, if configured."""
+    if not config:
+        return None
+    path = Path(executable)
+    if path.is_absolute() or os.sep in executable:
+        return None
+    entry = lookup_executable_config(config, executable)
+    return configured_executable_path(entry, where=f"executables.{executable}.path")
+
+
+def resolve_launch_command(args: list[str], config: dict | None = None) -> list[str]:
     """Return the command to run in the sandbox.
 
-    Uses the command-line arguments as the executable and its args. Bare names
-    are resolved on PATH while skipping buddelkiste shims, so the sandbox execs
-    the host binary instead of the wrapper (which would run ``bk run`` again).
-    An explicit path to a managed shim is rejected. If no command is given,
-    falls back to an interactive login shell.
+    Uses the command-line arguments as the executable and its args. A bare name
+    uses ``executables.<name>.path`` when that entry sets one. Otherwise bare
+    names are resolved on PATH while skipping buddelkiste shims, so the sandbox
+    execs the host binary instead of the wrapper (which would run ``bk run``
+    again). An explicit path to a managed shim is rejected. If no command is
+    given, falls back to an interactive login shell.
     """
     if args in (["--help"], ["-h"]):
         click.echo(click.get_current_context().get_help())
         raise SystemExit(0)
 
     if args:
-        return [resolve_run_executable(args[0]), *args[1:]]
+        return [
+            resolve_run_executable(args[0], configured=_configured_run_path(config, args[0])),
+            *args[1:],
+        ]
 
     pwent = pwd.getpwuid(os.getuid())
     return [pwent.pw_shell, "-si", "--"]
