@@ -831,14 +831,26 @@ def with_share_net(bwrap_args: list[str]) -> list[str]:
 
 
 def _replace_ro_bind_target(args: list[str], target: str, source: str) -> list[str]:
-    """Replace first --ro-bind source for a given target; insert before ``--`` if missing."""
+    """Point ``target`` at ``source`` with ``--ro-bind``.
+
+    Replaces an existing ``--ro-bind`` of ``target``. A ``--symlink`` whose
+    destination is ``target`` is replaced too: bwrap refuses to mount onto a
+    symlink it already created (host ``/etc/resolv.conf`` followed to the
+    systemd stub). Otherwise the bind is inserted before ``--``.
+    """
     out = list(args)
     i = 0
+    symlink_at: int | None = None
     while i + 2 < len(out):
+        if out[i] == "--symlink" and out[i + 2] == target and symlink_at is None:
+            symlink_at = i
         if out[i] == "--ro-bind" and out[i + 2] == target:
             out[i + 1] = source
             return out
         i += 1
+    if symlink_at is not None:
+        out[symlink_at : symlink_at + 3] = ["--ro-bind", source, target]
+        return out
     if "--" in out:
         idx = out.index("--")
         return [*out[:idx], "--ro-bind", source, target, *out[idx:]]

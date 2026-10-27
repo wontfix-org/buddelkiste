@@ -11,6 +11,7 @@ import pytest
 from buddelkiste.dns_proxy import DnsProxy
 from buddelkiste.network import (
     NetworkConfig,
+    _replace_ro_bind_target,
     _wait_for_tap,
     apply_nft_ruleset,
     build_nft_ruleset,
@@ -31,6 +32,33 @@ from buddelkiste.network import (
     stub_nameserver,
     with_share_net,
 )
+
+
+def test_replace_ro_bind_target_replaces_symlink_dest() -> None:
+    args = [
+        "bwrap",
+        "--ro-bind",
+        "/run/systemd/resolve/stub-resolv.conf",
+        "/run/systemd/resolve/stub-resolv.conf",
+        "--symlink",
+        "../run/systemd/resolve/stub-resolv.conf",
+        "/etc/resolv.conf",
+        "--",
+        "true",
+    ]
+    replaced = _replace_ro_bind_target(args, "/etc/resolv.conf", "/tmp/bk-resolv")
+    assert replaced == [
+        "bwrap",
+        "--ro-bind",
+        "/run/systemd/resolve/stub-resolv.conf",
+        "/run/systemd/resolve/stub-resolv.conf",
+        "--ro-bind",
+        "/tmp/bk-resolv",
+        "/etc/resolv.conf",
+        "--",
+        "true",
+    ]
+    assert replaced.count("/etc/resolv.conf") == 1
 
 
 def test_load_deny_preset_registry_validation() -> None:
