@@ -112,6 +112,7 @@ def test_effective_config_applies_layers(tmp_path: Path) -> None:
     merged = effective_config(config, executable="python", cwd=repo)
     assert merged["bind_conflicts"] == "weaker"
     assert merged["bind_symlinks"] == "follow"
+    assert merged["project_discovery"] == "discover"
     assert merged["features"]["user"] is True
     assert merged["features"]["git"] is True
     assert merged["features"]["python"] is True
@@ -150,6 +151,7 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     }
     text = format_active_info(config, executable="python", cwd=repo)
     assert f"project: {repo.resolve()}" in text
+    assert "project_discovery: discover" in text
     assert "consider_projects: true" in text
     assert "executable: python" in text
     assert "args (1):\n  - -u\n" in text
@@ -360,6 +362,26 @@ def test_ensure_cwd_covered_by_project_subdir_is_noop(
     config = {"projects": [{"path": str(tmp_path)}]}
     result = ensure_cwd_project(config)
     assert result == config
+
+
+def test_ensure_cwd_project_discovery_cwd_child_is_uncovered(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = tmp_path / "src"
+    child.mkdir()
+    monkeypatch.chdir(child)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
+    config = {
+        "project_discovery": "cwd",
+        "projects": [{"path": str(tmp_path)}],
+    }
+    with pytest.raises(click.ClickException, match="not under a configured project"):
+        ensure_cwd_project(config, cwd=child)
+
+    exact = ensure_cwd_project(config, cwd=tmp_path)
+    assert exact == config
 
 
 def test_ensure_cwd_bind_does_not_cover(
@@ -594,6 +616,54 @@ def test_get_binds_skips_project_when_not_considered(
         Path(bind.source).resolve() for bind in kept if hasattr(bind, "source")
     ]
     assert active.resolve() in kept_sources
+
+
+def test_get_binds_discover_all_binds_innermost_only(
+    tmp_path: Path,
+    runtime_dir: Path,
+) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    enabled = {name: False for name in FEATURE_NAMES}
+    binds = get_binds(
+        {
+            "project_discovery": "discover-all",
+            "projects": [
+                {"path": str(parent), "features": {"git": True}},
+                {"path": str(child), "features": {"python": True}},
+            ],
+        },
+        enabled,
+        cwd=child,
+    )
+    sources = [
+        Path(bind.source).resolve() for bind in binds if hasattr(bind, "source")
+    ]
+    assert child.resolve() in sources
+    assert parent.resolve() not in sources
+
+
+def test_format_active_info_discover_all_lists_projects(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    config = {
+        "project_discovery": "discover-all",
+        "projects": [
+            {"path": str(parent), "features": {"git": True}},
+            {"path": str(child), "features": {"python": True}},
+        ],
+    }
+    text = format_active_info(config, cwd=child)
+    assert "project_discovery: discover-all" in text
+    assert f"project: {parent.resolve()}, {child.resolve()}" in text
+    assert "  - git\n" in text
+    assert "  - python\n" in text
+    shown = format_effective_config(config, cwd=child)
+    assert "# project_discovery: discover-all" in shown
+    assert 'project_discovery = "discover-all"' in shown
+    assert f"# project: {parent.resolve()}, {child.resolve()}" in shown
 
 
 def test_format_active_info_notes_ignored_project(tmp_path: Path) -> None:

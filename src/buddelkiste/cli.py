@@ -126,16 +126,19 @@ start from any directory using only global and executable binds and
 features. Bind the trees that app needs (for example the home directory):
 the sandbox still changes to cwd, and cwd is not mounted on its own.
 
-projects: List of tables (``[[projects]]``) with a mandatory path. The most
-specific path that covers the current working directory is active: that tree
-is always bound read-write, and an optional features list or table is applied
-after the executable's features. Both are skipped when the executable sets
-consider_projects = false. Nested keys such as network.mode stay on the
-same array element. Feature defaults → global features →
-executables.<name>.features → project features → --feature / --no-feature.
-`bk info [EXECUTABLE]` prints a human-readable view of that merged config
-for the current directory. `bk config show [EXECUTABLE]` dumps the same
-tables as TOML.
+projects: List of tables (``[[projects]]``) with a mandatory path. Which
+entries apply depends on project_discovery. "discover" (default) uses the
+nearest project path: cwd itself, or the first parent directory that equals
+a ``[[projects]]`` path. "cwd" requires an exact path match. "discover-all"
+applies every covering project from the outermost path inward (feature
+tables overlay; a feature list replaces the enabled set). The innermost
+matching tree is bound read-write. Project features and that bind are
+skipped when the executable sets consider_projects = false. Nested keys
+such as network.mode stay on the same array element. Feature defaults →
+global features → executables.<name>.features → project features →
+--feature / --no-feature. `bk info [EXECUTABLE]` prints a human-readable
+view of that merged config for the current directory. `bk config show
+[EXECUTABLE]` dumps the same tables as TOML.
 
 shims: Global boolean (default true). When true, `bk shims install` creates
 PATH wrappers for configured executables; set false to disable unless an
@@ -268,6 +271,9 @@ needs prune first.
   shim = false
 
 \b
+  # project_discovery = "discover"  # or "cwd" / "discover-all"
+
+\b
   [[projects]]
   path = "/home/me/src/myapp"
   features = { python = true, rust = true }
@@ -307,9 +313,11 @@ needs prune first.
 
 # Working directory
 
-The current working directory must be a configured project: the working
-directory itself or a subdirectory of a [[projects]] path. A [[binds]] entry
-that happens to cover cwd is not enough. If no project covers cwd, the
+The current working directory must be a configured project. With
+project_discovery = "discover" (the default) or "discover-all", that is the
+working directory itself or a subdirectory of a [[projects]] path. With
+"cwd", the working directory must equal a [[projects]] path. A [[binds]]
+entry that happens to cover cwd is not enough. If no project covers cwd, the
 script asks yes (this run), always (persist a [[projects]] entry), or no
 (abort), then which features to enable. Features already set with --feature
 or --no-feature, and features the executable config already enables, are
@@ -343,6 +351,8 @@ from buddelkiste.features import (
     load_feature_registry,
     lookup_executable_config,
     lookup_project_config,
+    lookup_project_configs,
+    project_discovery,
     resolve_features,
 )
 from buddelkiste.network import (
@@ -673,8 +683,9 @@ def info(executable: str | None) -> None:
     """Print a human-readable view of the active config.
 
     Applies feature defaults, then global ``features``, then
-    ``executables.<name>.features``, then the active ``[[projects]]`` entry
-    unless that executable sets ``consider_projects = false``.
+    ``executables.<name>.features``, then ``[[projects]]`` entries selected
+    by ``project_discovery`` unless that executable sets
+    ``consider_projects = false``.
     Network and dbus-proxy use the same global → executable order. Use
     ``bk config show`` for the same merge as TOML.
     """
@@ -697,8 +708,9 @@ def config_show(executable: str | None) -> None:
     """Print the merged config for this directory and optional executable.
 
     Applies feature defaults, then global ``features``, then
-    ``executables.<name>.features``, then the active ``[[projects]]`` entry
-    unless that executable sets ``consider_projects = false``.
+    ``executables.<name>.features``, then ``[[projects]]`` entries selected
+    by ``project_discovery`` unless that executable sets
+    ``consider_projects = false``.
     Network and dbus-proxy use the same global → executable order. Output is
     TOML of the effective tables (not the stacked source lists).
     """
@@ -1192,6 +1204,7 @@ def effective_config(
         "shims": global_shims_enabled(config),
         "bind_conflicts": bind_conflict_policy(config),
         "bind_symlinks": bind_symlink_policy(config),
+        "project_discovery": project_discovery(config),
         "features": {name: bool(enabled.get(name)) for name in feature_names(registry)},
         "network": network_table,
     }
@@ -1210,6 +1223,7 @@ def effective_config(
             "shims",
             "bind_conflicts",
             "bind_symlinks",
+            "project_discovery",
         }:
             continue
         merged[key] = value
@@ -1230,6 +1244,7 @@ def format_effective_config(
     comments = [
         f"config: {config_path()}",
         f"cwd: {here}",
+        f"project_discovery: {project_discovery(config)}",
         f"project: {project_shown}",
         f"consider_projects: {'true' if considers else 'false'}",
         f"executable: {executable if executable else '(none)'}",
@@ -1245,6 +1260,7 @@ _INFO_SKIP = frozenset(
         "bind_conflicts",
         "bind_symlinks",
         "binds",
+        "project_discovery",
         "dbus_proxy",
         "envvars",
         "feature",
@@ -1272,6 +1288,7 @@ def format_active_info(
     lines = [
         f"config: {config_path()}",
         f"cwd: {here}",
+        f"project_discovery: {_info_inline(merged.get('project_discovery', 'discover'))}",
         f"project: {project_shown}",
         f"consider_projects: {_info_inline(considers)}",
         f"executable: {executable if executable else '(none)'}",
@@ -1352,15 +1369,18 @@ def _project_display(
     executable: str | None,
     cwd: Path,
 ) -> tuple[str, bool]:
-    """Return ``(project text, consider_projects)`` for info output."""
+    """Return ``(project text, consider_projects)`` for info output.
+
+    ``discover-all`` lists every applied path, outermost first. ``cwd`` and
+    ``discover`` show the single match.
+    """
     considers = executable_considers_projects(config, executable)
-    project = lookup_project_config(config, cwd=cwd)
-    if project is None:
+    projects = lookup_project_configs(config, cwd=cwd)
+    if not projects:
         shown = "(none)"
-    elif not considers:
-        shown = f"{project[0]} (not applied)"
     else:
-        shown = str(project[0])
+        roots = ", ".join(str(root) for root, _table in projects)
+        shown = roots if considers else f"{roots} (not applied)"
     return shown, considers
 
 
@@ -1619,11 +1639,14 @@ def ensure_cwd_project(
     disable: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> dict:
-    """Ensure the working directory is under a ``[[projects]]`` entry.
+    """Ensure the working directory matches a ``[[projects]]`` entry.
 
-    A ``[[binds]]`` mount that happens to cover cwd does not count. If no
-    project covers cwd, interactively offer yes (this run), always (persist
-    a ``[[projects]]`` entry), or no (abort), then which features to enable.
+    ``project_discovery`` decides what matches: ``cwd`` requires an equal
+    path, while ``discover`` and ``discover-all`` also accept a parent
+    project. A ``[[binds]]`` mount that happens to cover cwd does not count.
+    If no project covers cwd, interactively offer yes (this run), always
+    (persist a ``[[projects]]`` entry), or no (abort), then which features
+    to enable.
     Features named by ``enable`` or ``disable`` (CLI ``--feature`` /
     ``--no-feature``) are omitted, as are features the executable already
     enables. Those decisions are already made.
@@ -1635,7 +1658,7 @@ def ensure_cwd_project(
         return config
 
     here = (cwd if cwd is not None else Path.cwd()).resolve()
-    if lookup_project_config(config, cwd=here) is not None:
+    if lookup_project_configs(config, cwd=here):
         return config
 
     if not is_interactive():

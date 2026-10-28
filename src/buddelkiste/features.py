@@ -1069,23 +1069,46 @@ def apply_feature_spec(
     )
 
 
-def lookup_project_config(
-    config: dict,
-    cwd: Path | None = None,
-) -> tuple[Path, dict] | None:
-    """Return ``(root, table)`` for the most specific project covering ``cwd``.
+PROJECT_DISCOVERY_MODES = ("cwd", "discover", "discover-all")
+DEFAULT_PROJECT_DISCOVERY = "discover"
 
-    A project covers ``cwd`` when the paths are equal or ``cwd`` is inside the
-    project root. If several entries cover ``cwd``, the longest path wins; equal
-    length keeps the later list entry.
+
+def project_discovery(config: dict) -> str:
+    """Return the global ``project_discovery`` mode (default ``discover``)."""
+    if "project_discovery" not in config:
+        return DEFAULT_PROJECT_DISCOVERY
+    raw = config["project_discovery"]
+    if not isinstance(raw, str):
+        allowed = ", ".join(repr(item) for item in PROJECT_DISCOVERY_MODES)
+        raise click.ClickException(
+            f"project_discovery must be {allowed} (got {raw!r})"
+        )
+    value = raw.strip().lower()
+    if value not in PROJECT_DISCOVERY_MODES:
+        allowed = ", ".join(repr(item) for item in PROJECT_DISCOVERY_MODES)
+        raise click.ClickException(
+            f"project_discovery must be {allowed} (got {raw!r})"
+        )
+    return value
+
+
+def _covering_projects(
+    config: dict,
+    here: Path,
+    *,
+    exact: bool,
+) -> dict[Path, tuple[int, dict]]:
+    """Map each covering project path to ``(list index, table)``.
+
+    A later ``[[projects]]`` entry for the same resolved path replaces an
+    earlier one.
     """
     projects = config.get("projects")
     if not isinstance(projects, list):
-        return None
+        return {}
 
-    here = (cwd if cwd is not None else Path.cwd()).resolve()
-    best: tuple[int, Path, dict] | None = None
-    for entry in projects:
+    chosen: dict[Path, tuple[int, dict]] = {}
+    for index, entry in enumerate(projects):
         if not isinstance(entry, dict) or "path" not in entry:
             continue
         root = Path(str(entry["path"])).expanduser()
@@ -1093,18 +1116,60 @@ def lookup_project_config(
             root = root.resolve()
         except OSError:
             continue
-        if here != root and root not in here.parents:
+        if exact:
+            if here != root:
+                continue
+        elif here != root and root not in here.parents:
             continue
-        score = len(root.parts)
-        if best is None or score >= best[0]:
-            best = (score, root, entry)
-    if best is None:
+        chosen[root] = (index, entry)
+    return chosen
+
+
+def lookup_project_configs(
+    config: dict,
+    cwd: Path | None = None,
+) -> list[tuple[Path, dict]]:
+    """Return ``(root, table)`` pairs that apply to ``cwd``, outermost first.
+
+    ``project_discovery`` selects the set:
+
+    - ``cwd``: the project path must equal ``cwd``.
+    - ``discover`` (default): cwd, or the nearest parent directory that equals
+      a project path. One pair.
+    - ``discover-all``: every project path that is ``cwd`` or an ancestor,
+      outermost first.
+
+    Two entries for the same path keep the later list entry.
+    """
+    here = (cwd if cwd is not None else Path.cwd()).resolve()
+    mode = project_discovery(config)
+    chosen = _covering_projects(config, here, exact=(mode == "cwd"))
+    if not chosen:
+        return []
+    ordered = sorted(chosen.items(), key=lambda item: (len(item[0].parts), item[1][0]))
+    pairs = [(root, entry) for root, (_index, entry) in ordered]
+    if mode == "discover-all":
+        return pairs
+    return [pairs[-1]]
+
+
+def lookup_project_config(
+    config: dict,
+    cwd: Path | None = None,
+) -> tuple[Path, dict] | None:
+    """Return the innermost ``(root, table)`` that applies to ``cwd``.
+
+    ``cwd`` and ``discover`` have at most one match. ``discover-all`` returns
+    the innermost project of the merged set, or ``None`` when nothing matches.
+    """
+    found = lookup_project_configs(config, cwd=cwd)
+    if not found:
         return None
-    return best[1], best[2]
+    return found[-1]
 
 
 def resolved_project_root(config: dict, cwd: Path | None = None) -> Path:
-    """Active ``[[projects]]`` path covering ``cwd``, otherwise ``cwd``."""
+    """Innermost active ``[[projects]]`` path for ``cwd``, otherwise ``cwd``."""
     here = (cwd if cwd is not None else Path.cwd()).resolve()
     found = lookup_project_config(config, cwd=here)
     return found[0] if found else here
@@ -1170,8 +1235,10 @@ def resolve_features(
     2. global config ``features`` (list allowlist or table overrides)
     3. per-executable config ``executables.<name>.features`` when an executable
        is provided
-    4. active ``[[projects]]`` ``features`` when ``cwd`` is covered and the
-       executable considers projects (the default)
+    4. active ``[[projects]]`` ``features`` when ``cwd`` matches under
+       ``project_discovery`` and the executable considers projects (the
+       default). ``discover-all`` applies each covering project from the
+       outside in (a list replaces the enabled set; a table overlays)
     5. CLI ``--feature`` / ``--no-feature``
     """
     registry = load_feature_registry(config)
@@ -1191,10 +1258,10 @@ def resolve_features(
             registry=registry,
         )
 
-    project = lookup_project_config(config, cwd=cwd)
-    if project is not None and executable_considers_projects(config, executable):
-        root, table = project
-        if "features" in table:
+    if executable_considers_projects(config, executable):
+        for root, table in lookup_project_configs(config, cwd=cwd):
+            if "features" not in table:
+                continue
             apply_feature_spec(
                 enabled,
                 table["features"],

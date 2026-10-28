@@ -95,8 +95,10 @@ bk run --feature ssh --feature git git fetch
 
 Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
-active `[[projects]]` `features` (skipped when that executable sets
-`consider_projects = false`) → `--feature` / `--no-feature`.
+`[[projects]]` `features` selected by `project_discovery` (skipped when
+that executable sets `consider_projects = false`) → `--feature` /
+`--no-feature`. `discover-all` applies each covering project from the
+outside in.
 `bk info` (optional executable name) prints that merged view in a
 human-readable form, including the mounts after symlink follow/skip.
 `bk run --debug` logs each remap. `bk config show` dumps the same
@@ -294,22 +296,31 @@ to override the global default (useful on `git` / `glob` tables). Set
 `bind_symlinks = "preserve"` on a feature table to avoid pulling referents.
 `bk info` lists resolved mounts and follow remaps; `bk run --debug` logs them.
 
-The current working directory must be a configured project: the working
-directory itself or a subdirectory of a `[[projects]]` path. A `[[binds]]`
-entry that happens to cover cwd is not enough. If no project covers cwd,
-`bk` asks **yes** (this run), **always** (persist a `[[projects]]` entry),
-or **no** (abort), then which features to enable. Both prompts are Rich
-lists (arrow keys, enter; space toggles features, typing filters them).
+The current working directory must be a configured project.
+`project_discovery` chooses how `[[projects]]` paths are matched:
+
+| Value | Meaning |
+|-------|---------|
+| `discover` (default) | cwd, or the nearest parent directory that equals a project path |
+| `cwd` | the working directory must equal a `[[projects]]` path |
+| `discover-all` | every covering project, outermost first; feature tables overlay and a feature list replaces the enabled set |
+
+A `[[binds]]` entry that happens to cover cwd is not enough. If no project
+matches, `bk` asks **yes** (this run), **always** (persist a `[[projects]]`
+entry), or **no** (abort), then which features to enable. Both prompts are
+Rich lists (arrow keys, enter; space toggles features, typing filters them).
 Features already chosen with `--feature` / `--no-feature`, and features the
 executable config already enables, are left out of the feature list.
-A project is always bound read-write. Non-interactively it errors instead.
-Set `consider_projects = false` on an `[executables.<name>]` entry to skip
-that check and ignore `[[projects]]` for that program (no project features,
-no project bind). `bk run` still changes into the working directory, so that
-directory must already be covered by a global, feature, or executable bind
-(for example the home directory).
+The innermost matching project is bound read-write. Non-interactively it
+errors instead. Set `consider_projects = false` on an `[executables.<name>]`
+entry to skip that check and ignore `[[projects]]` for that program (no
+project features, no project bind). `bk run` still changes into the working
+directory, so that directory must already be covered by a global, feature,
+or executable bind (for example the home directory).
 
 ```toml
+# project_discovery = "discover"  # or "cwd" / "discover-all"
+
 [[projects]]
 path = "/home/me/src/myapp"
 features = { python = true, rust = true }

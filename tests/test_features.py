@@ -27,6 +27,8 @@ from buddelkiste.features import (
     load_entry_point_features,
     load_feature_registry,
     lookup_project_config,
+    lookup_project_configs,
+    project_discovery,
     python_binds,
     resolve_features,
     resolved_project_root,
@@ -281,6 +283,99 @@ def test_lookup_project_most_specific_wins(tmp_path: Path) -> None:
     enabled = resolve_features(config, cwd=child)
     assert enabled["python"] is True
     assert enabled["git"] is False
+
+    explicit = {**config, "project_discovery": "discover"}
+    assert lookup_project_configs(explicit, cwd=child) == [found]
+    assert project_discovery({}) == "discover"
+
+
+def test_project_discovery_cwd_requires_exact_path(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    nested = child / "pkg"
+    nested.mkdir(parents=True)
+    config = {
+        "project_discovery": "cwd",
+        "projects": [
+            {"path": str(parent), "features": {"git": True}},
+            {"path": str(child), "features": {"python": True}},
+        ],
+    }
+    found = lookup_project_config(config, cwd=child)
+    assert found is not None
+    assert found[0] == child.resolve()
+    assert lookup_project_configs(config, cwd=nested) == []
+    assert lookup_project_config(config, cwd=parent)[0] == parent.resolve()
+
+    enabled = resolve_features(config, cwd=nested)
+    assert enabled["git"] is False
+    assert enabled["python"] is False
+    assert resolved_project_root(config, cwd=nested) == nested.resolve()
+
+
+def test_project_discovery_all_merges_outer_to_inner(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    config = {
+        "project_discovery": "discover-all",
+        "projects": [
+            {"path": str(child), "features": {"python": True}},
+            {"path": str(parent), "features": {"git": True}},
+        ],
+    }
+    found = lookup_project_configs(config, cwd=child)
+    assert [root for root, _table in found] == [parent.resolve(), child.resolve()]
+    assert lookup_project_config(config, cwd=child) == found[-1]
+    assert resolved_project_root(config, cwd=child) == child.resolve()
+
+    enabled = resolve_features(config, cwd=child)
+    assert enabled["git"] is True
+    assert enabled["python"] is True
+
+
+def test_project_discovery_all_child_list_replaces(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    config = {
+        "project_discovery": "discover-all",
+        "projects": [
+            {"path": str(parent), "features": {"git": True, "python": True}},
+            {"path": str(child), "features": ["rust"]},
+        ],
+    }
+    enabled = resolve_features(config, cwd=child)
+    assert enabled["rust"] is True
+    assert enabled["git"] is False
+    assert enabled["python"] is False
+
+
+def test_project_discovery_all_duplicate_path_keeps_later(tmp_path: Path) -> None:
+    parent = tmp_path / "src"
+    child = parent / "app"
+    child.mkdir(parents=True)
+    config = {
+        "project_discovery": "discover-all",
+        "projects": [
+            {"path": str(parent), "features": {"git": True}},
+            {"path": str(parent), "features": {"ssh": True}},
+            {"path": str(child), "features": {"python": True}},
+        ],
+    }
+    found = lookup_project_configs(config, cwd=child)
+    assert found[0][1]["features"] == {"ssh": True}
+    enabled = resolve_features(config, cwd=child)
+    assert enabled["ssh"] is True
+    assert enabled["python"] is True
+    assert enabled["git"] is False
+
+
+def test_project_discovery_rejects_unknown(tmp_path: Path) -> None:
+    with pytest.raises(click.ClickException, match="project_discovery"):
+        project_discovery({"project_discovery": "nope"})
+    with pytest.raises(click.ClickException, match="project_discovery"):
+        lookup_project_config({"project_discovery": 1}, cwd=tmp_path)
 
 
 def test_lookup_project_later_same_path_wins(tmp_path: Path) -> None:
