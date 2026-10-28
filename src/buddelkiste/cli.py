@@ -305,9 +305,11 @@ The current working directory must be a configured project: the working
 directory itself or a subdirectory of a [[projects]] path. A [[binds]] entry
 that happens to cover cwd is not enough. If no project covers cwd, the
 script asks yes (this run), always (persist a [[projects]] entry), or no
-(abort), then which features to enable. Both prompts are Rich lists (arrow
-keys, enter; space toggles features, typing filters them). Non-interactively
-it exits with an error instead.
+(abort), then which features to enable. Features already set with --feature
+or --no-feature, and features the executable config already enables, are
+left out of that list. Both prompts are Rich lists (arrow keys, enter; space
+toggles features, typing filters them). Non-interactively it exits with an
+error instead.
 """
 
 from buddelkiste.binds import (
@@ -539,7 +541,12 @@ def run(
     command = resolve_launch_command(args, config)
     executable = command_executable(command, args)
     command = append_executable_args(command, config, executable)
-    config = ensure_cwd_project(config, executable=executable)
+    config = ensure_cwd_project(
+        config,
+        executable=executable,
+        enable=enable_features,
+        disable=disable_features,
+    )
     enabled = resolve_features(
         config,
         executable=executable,
@@ -1562,6 +1569,8 @@ def ensure_cwd_project(
     config: dict,
     *,
     executable: str | None = None,
+    enable: Sequence[str] = (),
+    disable: Sequence[str] = (),
     cwd: Path | None = None,
 ) -> dict:
     """Ensure the working directory is under a ``[[projects]]`` entry.
@@ -1569,8 +1578,9 @@ def ensure_cwd_project(
     A ``[[binds]]`` mount that happens to cover cwd does not count. If no
     project covers cwd, interactively offer yes (this run), always (persist
     a ``[[projects]]`` entry), or no (abort), then which features to enable.
-    When ``executable`` is known, features it already enables are omitted
-    from the feature list.
+    Features named by ``enable`` or ``disable`` (CLI ``--feature`` /
+    ``--no-feature``) are omitted, as are features the executable already
+    enables. Those decisions are already made.
     """
     here = (cwd if cwd is not None else Path.cwd()).resolve()
     if lookup_project_config(config, cwd=here) is not None:
@@ -1591,7 +1601,12 @@ def ensure_cwd_project(
     if choice == "no":
         raise click.Abort()
 
-    features = prompt_project_features(config, executable=executable)
+    features = prompt_project_features(
+        config,
+        executable=executable,
+        enable=enable,
+        disable=disable,
+    )
     table: dict = {"path": str(here)}
     if features:
         table["features"] = features

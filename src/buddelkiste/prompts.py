@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from beaupy import Config, select, select_multiple
 from rich.console import Console
 
@@ -57,18 +59,24 @@ def prompt_project_features(
     config: dict,
     *,
     executable: str | None = None,
+    enable: Sequence[str] = (),
+    disable: Sequence[str] = (),
     console: Console | None = None,
 ) -> dict[str, bool]:
     """Ask which extra features to enable for a new project.
 
-    Features the current executable already enables are omitted from the list.
+    Features already chosen on the command line (``--feature`` /
+    ``--no-feature``) and features the current executable already enables are
+    omitted. Those decisions are already made.
     """
     registry = load_feature_registry(config)
-    already = _executable_feature_names(config, executable)
+    decided = _executable_feature_names(config, executable)
+    decided.update(enable)
+    decided.update(disable)
     names = [
         name
         for name in feature_names(registry)
-        if name != "user" and name not in already
+        if name != "user" and name not in decided
     ]
     if not names:
         return {}

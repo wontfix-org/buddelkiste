@@ -100,6 +100,57 @@ def test_prompt_project_features_omits_executable_table_trues(monkeypatch) -> No
     assert "rust" in seen["options"]
 
 
+def test_prompt_project_features_omits_cli_enable_and_disable(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_select_multiple(options, **kwargs):
+        seen["options"] = options
+        return ["git"]
+
+    monkeypatch.setattr("buddelkiste.prompts.select_multiple", fake_select_multiple)
+    selected = prompt_project_features(
+        {},
+        executable="cursor-agent",
+        enable=("python", "ssh"),
+        disable=("rust",),
+        console=_console(),
+    )
+    assert selected == {"git": True}
+    assert "python" not in seen["options"]
+    assert "ssh" not in seen["options"]
+    assert "rust" not in seen["options"]
+    assert "git" in seen["options"]
+    assert "cursor" in seen["options"]
+
+
+def test_prompt_project_features_cli_and_executable_together(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_select_multiple(options, **kwargs):
+        seen["options"] = options
+        return []
+
+    monkeypatch.setattr("buddelkiste.prompts.select_multiple", fake_select_multiple)
+    config = {
+        "executables": {
+            "python": {"features": ["python", "git"]},
+        }
+    }
+    prompt_project_features(
+        config,
+        executable="/usr/bin/python",
+        enable=("ssh",),
+        disable=("rust", "node"),
+        console=_console(),
+    )
+    assert "python" not in seen["options"]
+    assert "git" not in seen["options"]
+    assert "ssh" not in seen["options"]
+    assert "rust" not in seen["options"]
+    assert "node" not in seen["options"]
+    assert "cursor" in seen["options"]
+
+
 def test_prompt_project_features_unknown_executable_keeps_catalog(
     monkeypatch,
 ) -> None:

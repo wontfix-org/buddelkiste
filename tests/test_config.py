@@ -446,8 +446,15 @@ def test_ensure_cwd_forwards_executable_to_feature_prompt(
         return {}
 
     monkeypatch.setattr("buddelkiste.prompts.prompt_project_features", fake_features)
-    ensure_cwd_project({}, executable="/usr/bin/python")
+    ensure_cwd_project(
+        {},
+        executable="/usr/bin/python",
+        enable=("ssh",),
+        disable=("rust",),
+    )
     assert seen["executable"] == "/usr/bin/python"
+    assert seen["enable"] == ("ssh",)
+    assert seen["disable"] == ("rust",)
 
 
 def test_ensure_cwd_abort(

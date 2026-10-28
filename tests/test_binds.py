@@ -493,10 +493,13 @@ def test_get_binds_follow_file_symlink(
         {"binds": [{"source": str(link), "mode": "ro"}]},
         {name: False for name in FEATURE_NAMES},
     )
-    assert events
-    assert events[0].action == "follow"
-    assert events[0].origin == "binds[0]"
-    assert events[0].referent == real_s
+    followed = [
+        event
+        for event in events
+        if event.action == "follow" and event.origin == "binds[0]"
+    ]
+    assert len(followed) == 1
+    assert followed[0].referent == real_s
 
 
 def test_get_binds_preserve_file_symlink(

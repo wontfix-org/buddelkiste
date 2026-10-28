@@ -298,6 +298,8 @@ entry that happens to cover cwd is not enough. If no project covers cwd,
 `bk` asks **yes** (this run), **always** (persist a `[[projects]]` entry),
 or **no** (abort), then which features to enable. Both prompts are Rich
 lists (arrow keys, enter; space toggles features, typing filters them).
+Features already chosen with `--feature` / `--no-feature`, and features the
+executable config already enables, are left out of the feature list.
 A project is always bound read-write. Non-interactively it errors instead.
 
 ```toml
