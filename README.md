@@ -95,7 +95,8 @@ bk run --feature ssh --feature git git fetch
 
 Precedence (later wins for CLI flags): feature defaults → global config
 `features` → per-executable `executables.<name>.features` →
-active `[[projects]]` `features` → `--feature` / `--no-feature`.
+active `[[projects]]` `features` (skipped when that executable sets
+`consider_projects = false`) → `--feature` / `--no-feature`.
 `bk info` (optional executable name) prints that merged view in a
 human-readable form, including the mounts after symlink follow/skip.
 `bk run --debug` logs each remap. `bk config show` dumps the same
@@ -166,6 +167,7 @@ source = "${HOME}/.cache/zig"
 mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays/<hash>
 
 [executables.cursor-agent]
+consider_projects = false
 features = ["user", "cursor", "git", "ssh", "gui", "dbus", "xdg-open"]
 args = ["--force"]
 
@@ -301,6 +303,11 @@ lists (arrow keys, enter; space toggles features, typing filters them).
 Features already chosen with `--feature` / `--no-feature`, and features the
 executable config already enables, are left out of the feature list.
 A project is always bound read-write. Non-interactively it errors instead.
+Set `consider_projects = false` on an `[executables.<name>]` entry to skip
+that check and ignore `[[projects]]` for that program (no project features,
+no project bind). `bk run` still changes into the working directory, so that
+directory must already be covered by a global, feature, or executable bind
+(for example the home directory).
 
 ```toml
 [[projects]]

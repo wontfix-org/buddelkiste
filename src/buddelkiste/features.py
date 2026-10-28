@@ -1137,6 +1137,24 @@ def lookup_executable_config(config: dict, executable: str | None) -> dict | Non
     return None
 
 
+def executable_considers_projects(config: dict, executable: str | None) -> bool:
+    """Whether this executable applies ``[[projects]]`` (default true).
+
+    ``consider_projects = false`` skips the project requirement, project
+    features, and the automatic project bind. A missing key, or no matching
+    executable, means true.
+    """
+    exec_cfg = lookup_executable_config(config, executable)
+    if exec_cfg is None or "consider_projects" not in exec_cfg:
+        return True
+    value = exec_cfg["consider_projects"]
+    if not isinstance(value, bool):
+        raise click.ClickException(
+            "executables.*.consider_projects must be a boolean"
+        )
+    return value
+
+
 def resolve_features(
     config: dict,
     *,
@@ -1152,7 +1170,8 @@ def resolve_features(
     2. global config ``features`` (list allowlist or table overrides)
     3. per-executable config ``executables.<name>.features`` when an executable
        is provided
-    4. active ``[[projects]]`` ``features`` when ``cwd`` is covered
+    4. active ``[[projects]]`` ``features`` when ``cwd`` is covered and the
+       executable considers projects (the default)
     5. CLI ``--feature`` / ``--no-feature``
     """
     registry = load_feature_registry(config)
@@ -1173,7 +1192,7 @@ def resolve_features(
         )
 
     project = lookup_project_config(config, cwd=cwd)
-    if project is not None:
+    if project is not None and executable_considers_projects(config, executable):
         root, table = project
         if "features" in table:
             apply_feature_spec(

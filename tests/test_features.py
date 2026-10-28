@@ -18,6 +18,7 @@ from buddelkiste.features import (
     cursor_binds,
     dbus_binds,
     dbus_proxy_setup,
+    executable_considers_projects,
     expand_bind_path,
     feature_binds,
     feature_env_var_names,
@@ -167,6 +168,85 @@ def test_resolve_features_project_table_adds_on_executable_list(
     assert enabled["git"] is True
     assert enabled["python"] is True
     assert enabled["rust"] is True
+
+
+def test_resolve_features_skips_project_when_not_considered(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "executables": {
+            "cursor-agent": {
+                "consider_projects": False,
+                "features": ["cursor", "git"],
+            }
+        },
+        "projects": [
+            {"path": str(repo), "features": {"python": True, "rust": True}}
+        ],
+    }
+    enabled = resolve_features(
+        config, executable="cursor-agent", enable=("ssh",), cwd=repo
+    )
+    assert enabled["cursor"] is True
+    assert enabled["git"] is True
+    assert enabled["ssh"] is True
+    assert enabled["python"] is False
+    assert enabled["rust"] is False
+
+
+def test_resolve_features_explicit_consider_projects_applies_project(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "executables": {
+            "cursor-agent": {
+                "consider_projects": True,
+                "features": ["cursor", "git"],
+            }
+        },
+        "projects": [
+            {"path": str(repo), "features": {"python": True, "rust": True}}
+        ],
+    }
+    enabled = resolve_features(config, executable="cursor-agent", cwd=repo)
+    assert enabled["python"] is True
+    assert enabled["rust"] is True
+
+
+def test_executable_considers_projects_defaults_true() -> None:
+    assert executable_considers_projects({}, None) is True
+    assert executable_considers_projects({}, "python") is True
+    assert (
+        executable_considers_projects({"executables": {"python": {}}}, "python")
+        is True
+    )
+    assert (
+        executable_considers_projects(
+            {"executables": {"python": {"consider_projects": True}}},
+            "/usr/bin/python",
+        )
+        is True
+    )
+
+
+def test_executable_considers_projects_false() -> None:
+    assert (
+        executable_considers_projects(
+            {"executables": {"cursor-agent": {"consider_projects": False}}},
+            "cursor-agent",
+        )
+        is False
+    )
+
+
+def test_executable_considers_projects_rejects_non_bool() -> None:
+    with pytest.raises(click.ClickException, match="consider_projects"):
+        executable_considers_projects(
+            {"executables": {"cursor": {"consider_projects": "no"}}},
+            "cursor",
+        )
 
 
 def test_resolve_features_project_list_is_allowlist(tmp_path: Path) -> None:

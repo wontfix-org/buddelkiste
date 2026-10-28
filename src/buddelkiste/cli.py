@@ -117,15 +117,20 @@ file name only, so the same entry applies to a bare command or any absolute
 path to that file. When several keys share a file name, the first one wins.
 Each entry may contain a features list or table, a network table, an args list
 of extra arguments appended to the command, a shim boolean (override
-the global shims toggle), and/or path (an absolute executable to run
-instead of searching PATH for the section's file name). ``~`` in path is
+the global shims toggle), path (an absolute executable to run
+instead of searching PATH for the section's file name), and
+consider_projects (boolean, default true). ``~`` in path is
 expanded. ``bk run`` uses it for a bare command name; installed shims exec
-that file directly.
+that file directly. Set consider_projects = false for an app that should
+start from any directory using only global and executable binds and
+features. Bind the trees that app needs (for example the home directory):
+the sandbox still changes to cwd, and cwd is not mounted on its own.
 
 projects: List of tables (``[[projects]]``) with a mandatory path. The most
 specific path that covers the current working directory is active: that tree
 is always bound read-write, and an optional features list or table is applied
-after the executable's features. Nested keys such as network.mode stay on the
+after the executable's features. Both are skipped when the executable sets
+consider_projects = false. Nested keys such as network.mode stay on the
 same array element. Feature defaults → global features →
 executables.<name>.features → project features → --feature / --no-feature.
 `bk info [EXECUTABLE]` prints a human-readable view of that merged config
@@ -246,6 +251,7 @@ needs prune first.
 
 \b
   [executables.cursor-agent]
+  consider_projects = false
   features = ["cursor", "git", "ssh", "gui"]
   args = ["--force"]
   # path = "/opt/cursor/cursor-agent"  # run this file instead of PATH lookup
@@ -309,7 +315,8 @@ script asks yes (this run), always (persist a [[projects]] entry), or no
 or --no-feature, and features the executable config already enables, are
 left out of that list. Both prompts are Rich lists (arrow keys, enter; space
 toggles features, typing filters them). Non-interactively it exits with an
-error instead.
+error instead. An executable with consider_projects = false skips this
+check and ignores [[projects]] (no project features, no project bind).
 """
 
 from buddelkiste.binds import (
@@ -327,6 +334,7 @@ from buddelkiste.features import (
     FEATURES,
     binds_from_spec,
     check_feature_requirements,
+    executable_considers_projects,
     feature_binds,
     feature_env_var_names,
     feature_names,
@@ -565,7 +573,9 @@ def run(
         allow_presets=net_allow_preset,
         deny_presets=net_deny_preset,
     )
-    binds, symlink_events = resolve_sandbox_binds(config, enabled)
+    binds, symlink_events = resolve_sandbox_binds(
+        config, enabled, executable=executable
+    )
     log_bind_symlink_events(symlink_events)
     env_args = get_env_args(config, enabled)
 
@@ -663,7 +673,8 @@ def info(executable: str | None) -> None:
     """Print a human-readable view of the active config.
 
     Applies feature defaults, then global ``features``, then
-    ``executables.<name>.features``, then the active ``[[projects]]`` entry.
+    ``executables.<name>.features``, then the active ``[[projects]]`` entry
+    unless that executable sets ``consider_projects = false``.
     Network and dbus-proxy use the same global → executable order. Use
     ``bk config show`` for the same merge as TOML.
     """
@@ -686,7 +697,8 @@ def config_show(executable: str | None) -> None:
     """Print the merged config for this directory and optional executable.
 
     Applies feature defaults, then global ``features``, then
-    ``executables.<name>.features``, then the active ``[[projects]]`` entry.
+    ``executables.<name>.features``, then the active ``[[projects]]`` entry
+    unless that executable sets ``consider_projects = false``.
     Network and dbus-proxy use the same global → executable order. Output is
     TOML of the effective tables (not the stacked source lists).
     """
@@ -1212,11 +1224,14 @@ def format_effective_config(
 ) -> str:
     """TOML dump of the merged config with source comments."""
     here = (cwd if cwd is not None else Path.cwd()).resolve()
-    project = lookup_project_config(config, cwd=here)
+    project_shown, considers = _project_display(
+        config, executable=executable, cwd=here
+    )
     comments = [
         f"config: {config_path()}",
         f"cwd: {here}",
-        f"project: {project[0] if project is not None else '(none)'}",
+        f"project: {project_shown}",
+        f"consider_projects: {'true' if considers else 'false'}",
         f"executable: {executable if executable else '(none)'}",
     ]
     return format_toml_document(
@@ -1248,14 +1263,17 @@ def format_active_info(
 ) -> str:
     """Human-readable view of the merged config for ``cwd`` and ``executable``."""
     here = (cwd if cwd is not None else Path.cwd()).resolve()
-    project = lookup_project_config(config, cwd=here)
+    project_shown, considers = _project_display(
+        config, executable=executable, cwd=here
+    )
     merged = effective_config(config, executable=executable, cwd=here)
     exec_cfg = lookup_executable_config(config, executable)
 
     lines = [
         f"config: {config_path()}",
         f"cwd: {here}",
-        f"project: {project[0] if project is not None else '(none)'}",
+        f"project: {project_shown}",
+        f"consider_projects: {_info_inline(considers)}",
         f"executable: {executable if executable else '(none)'}",
     ]
     extra_args = exec_cfg.get("args") if exec_cfg else None
@@ -1310,7 +1328,9 @@ def format_active_info(
         if isinstance(features, Mapping)
         else None
     )
-    _append_resolved_binds_info(lines, config, enabled=feature_map, cwd=here)
+    _append_resolved_binds_info(
+        lines, config, enabled=feature_map, executable=executable, cwd=here
+    )
 
     envvars = merged.get("envvars")
     if isinstance(envvars, list) and envvars:
@@ -1324,6 +1344,24 @@ def format_active_info(
         _append_info_value(lines, key, value)
 
     return "\n".join(lines) + "\n"
+
+
+def _project_display(
+    config: dict,
+    *,
+    executable: str | None,
+    cwd: Path,
+) -> tuple[str, bool]:
+    """Return ``(project text, consider_projects)`` for info output."""
+    considers = executable_considers_projects(config, executable)
+    project = lookup_project_config(config, cwd=cwd)
+    if project is None:
+        shown = "(none)"
+    elif not considers:
+        shown = f"{project[0]} (not applied)"
+    else:
+        shown = str(project[0])
+    return shown, considers
 
 
 def _info_inline(value: object) -> str:
@@ -1351,9 +1389,12 @@ def _append_resolved_binds_info(
     *,
     enabled: dict[str, bool] | None,
     cwd: Path,
+    executable: str | None = None,
 ) -> None:
     try:
-        resolved, events = resolve_sandbox_binds(config, enabled, cwd=cwd)
+        resolved, events = resolve_sandbox_binds(
+            config, enabled, executable=executable, cwd=cwd
+        )
     except (click.ClickException, OSError, TypeError, ValueError) as exc:
         lines.append("")
         lines.append(f"resolved binds: (unavailable: {exc})")
@@ -1517,6 +1558,7 @@ def resolve_sandbox_binds(
     config: dict,
     enabled: dict[str, bool] | None = None,
     *,
+    executable: str | None = None,
     cwd: Path | None = None,
 ) -> tuple[list, list]:
     """Return ``(binds, bind_symlink_events)`` after follow / conflict resolution."""
@@ -1528,7 +1570,7 @@ def resolve_sandbox_binds(
     )
 
     if enabled is None:
-        enabled = resolve_features(config, cwd=cwd)
+        enabled = resolve_features(config, executable=executable, cwd=cwd)
     binds = feature_binds(enabled, config)
     for index, bind_params in enumerate(config.get("binds", ())):
         for bind in binds_from_spec(dict(bind_params), where=f"binds[{index}]"):
@@ -1536,10 +1578,11 @@ def resolve_sandbox_binds(
             if not src.exists() and not src.is_symlink():
                 raise FileNotFoundError(bind.source)
             binds.append(set_bind_origin(bind, f"binds[{index}]"))
-    project = lookup_project_config(config, cwd=cwd)
-    if project is not None:
-        root, _table = project
-        binds.append(set_bind_origin(bind_config(root, mode="rw"), "project"))
+    if executable_considers_projects(config, executable):
+        project = lookup_project_config(config, cwd=cwd)
+        if project is not None:
+            root, _table = project
+            binds.append(set_bind_origin(bind_config(root, mode="rw"), "project"))
     try:
         binds, events = apply_bind_symlinks(binds, bind_symlink_policy(config))
     except (TypeError, ValueError) as exc:
@@ -1551,9 +1594,12 @@ def get_binds(
     config: dict,
     enabled: dict[str, bool] | None = None,
     *,
+    executable: str | None = None,
     cwd: Path | None = None,
 ) -> list:
-    binds, _events = resolve_sandbox_binds(config, enabled, cwd=cwd)
+    binds, _events = resolve_sandbox_binds(
+        config, enabled, executable=executable, cwd=cwd
+    )
     return binds
 
 
@@ -1581,7 +1627,13 @@ def ensure_cwd_project(
     Features named by ``enable`` or ``disable`` (CLI ``--feature`` /
     ``--no-feature``) are omitted, as are features the executable already
     enables. Those decisions are already made.
+
+    An executable with ``consider_projects = false`` skips this entirely:
+    no prompt, no error, and no injected project.
     """
+    if not executable_considers_projects(config, executable):
+        return config
+
     here = (cwd if cwd is not None else Path.cwd()).resolve()
     if lookup_project_config(config, cwd=here) is not None:
         return config

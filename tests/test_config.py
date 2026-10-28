@@ -13,6 +13,7 @@ from buddelkiste.cli import (
     effective_config,
     ensure_cwd_project,
     format_active_info,
+    format_effective_config,
     format_toml_document,
     get_binds,
     get_env_args,
@@ -149,6 +150,7 @@ def test_format_active_info_lists_enabled_settings(tmp_path: Path) -> None:
     }
     text = format_active_info(config, executable="python", cwd=repo)
     assert f"project: {repo.resolve()}" in text
+    assert "consider_projects: true" in text
     assert "executable: python" in text
     assert "args (1):\n  - -u\n" in text
     assert "bind_conflicts: error" in text
@@ -457,6 +459,59 @@ def test_ensure_cwd_forwards_executable_to_feature_prompt(
     assert seen["disable"] == ("rust",)
 
 
+def test_ensure_cwd_consider_projects_false_skips_uncovered(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
+
+    def fail_prompt(*_args, **_kwargs):
+        raise AssertionError("prompted")
+
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", fail_prompt)
+    config = {"executables": {"cursor-agent": {"consider_projects": False}}}
+    result = ensure_cwd_project(config, executable="/usr/bin/cursor-agent")
+    assert result is config
+    assert "projects" not in result
+
+
+def test_ensure_cwd_consider_projects_false_inside_project(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: True)
+
+    def fail_prompt(*_args, **_kwargs):
+        raise AssertionError("prompted")
+
+    monkeypatch.setattr("buddelkiste.prompts.prompt_cwd_access", fail_prompt)
+    config = {
+        "executables": {"cursor": {"consider_projects": False}},
+        "projects": [{"path": str(repo), "features": {"python": True}}],
+    }
+    result = ensure_cwd_project(config, executable="cursor")
+    assert result is config
+    assert result["projects"] == config["projects"]
+
+
+def test_ensure_cwd_consider_projects_true_still_requires_project(
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("buddelkiste.cli.is_interactive", lambda: False)
+    config = {"executables": {"python": {"consider_projects": True}}}
+    with pytest.raises(click.ClickException, match="not under a configured project"):
+        ensure_cwd_project(config, executable="python")
+
+
 def test_ensure_cwd_abort(
     tmp_path: Path,
     runtime_dir: Path,
@@ -503,6 +558,64 @@ def test_get_binds_only_mounts_active_project(
     ]
     assert active.resolve() in sources
     assert other.resolve() not in sources
+
+
+def test_get_binds_skips_project_when_not_considered(
+    tmp_path: Path,
+    runtime_dir: Path,
+) -> None:
+    active = tmp_path / "active"
+    active.mkdir()
+    enabled = {name: False for name in FEATURE_NAMES}
+    skipped = get_binds(
+        {
+            "executables": {"cursor-agent": {"consider_projects": False}},
+            "projects": [{"path": str(active)}],
+        },
+        enabled,
+        executable="cursor-agent",
+        cwd=active,
+    )
+    skipped_sources = [
+        Path(bind.source).resolve() for bind in skipped if hasattr(bind, "source")
+    ]
+    assert active.resolve() not in skipped_sources
+
+    kept = get_binds(
+        {
+            "executables": {"cursor-agent": {"consider_projects": True}},
+            "projects": [{"path": str(active)}],
+        },
+        enabled,
+        executable="cursor-agent",
+        cwd=active,
+    )
+    kept_sources = [
+        Path(bind.source).resolve() for bind in kept if hasattr(bind, "source")
+    ]
+    assert active.resolve() in kept_sources
+
+
+def test_format_active_info_notes_ignored_project(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = {
+        "executables": {
+            "cursor-agent": {
+                "consider_projects": False,
+                "features": ["cursor"],
+            }
+        },
+        "projects": [{"path": str(repo), "features": {"rust": True}}],
+    }
+    text = format_active_info(config, executable="cursor-agent", cwd=repo)
+    assert f"project: {repo.resolve()} (not applied)" in text
+    assert "consider_projects: false" in text
+    assert "  - cursor\n" in text
+    assert "  - rust\n" not in text
+    shown = format_effective_config(config, executable="cursor-agent", cwd=repo)
+    assert f"# project: {repo.resolve()} (not applied)" in shown
+    assert "# consider_projects: false" in shown
 
 
 def test_add_project_to_config_writes_table(tmp_config: Path, tmp_path: Path) -> None:
