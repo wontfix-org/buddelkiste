@@ -655,6 +655,48 @@ only a loopback stub, sandbox DNS is relayed to that stub from the host netns
 and systemd-resolved chooses the uplinks. Other nameserver IPs from
 `/etc/resolv.conf` are auto-allowed so DNS still works under that deny policy.
 
+### Ubuntu: slirp4netns and AppArmor
+
+Ubuntu 23.10 and later (including 26.04) set
+`kernel.apparmor_restrict_unprivileged_userns=1`. Only binaries with an
+AppArmor profile that grants `userns` may create user namespaces. `bwrap` and
+`pasta` ship such profiles, so the default `pasta` backend works out of the box.
+The `slirp4netns` backend starts its namespace with util-linux `unshare`, which
+has no profile, and fails with:
+
+```text
+unshare: write failed /proc/self/uid_map: Operation not permitted
+```
+
+Either keep `backend = "pasta"`, or install this profile as
+`/etc/apparmor.d/buddelkiste-unshare`:
+
+```text
+# Allow util-linux unshare to create unprivileged user namespaces
+# (buddelkiste network.backend = "slirp4netns" on Ubuntu 23.10+).
+abi <abi/4.0>,
+include <tunables/global>
+
+profile buddelkiste-unshare /usr/bin/unshare flags=(unconfined) {
+  userns,
+
+  include if exists <local/buddelkiste-unshare>
+}
+```
+
+Load it and check:
+
+```bash
+sudo apparmor_parser -r /etc/apparmor.d/buddelkiste-unshare
+unshare --user --map-root-user --net true && echo ok
+```
+
+The profile applies to every caller of `/usr/bin/unshare`, not only
+buddelkiste: any local user can then create user namespaces through it, which
+is the attack surface the Ubuntu default restricts. Remove it with
+`sudo apparmor_parser -R /etc/apparmor.d/buddelkiste-unshare` and delete the
+file.
+
 ## Development
 
 ```bash
@@ -664,7 +706,16 @@ uv run pytest                 # unit + integ + host e2e + coverage
 uv run pytest -m integration  # nested-safe real bwrap (host/none)
 uv run pytest -m e2e          # host e2e: filter/tun, nested ns, docker
 uv run pytest -m "not e2e"    # exclude host e2e (use inside a bwrap sandbox)
+just debug-log                # same suite, teed to debug.log (host, not sandbox)
+just debug-log vm debian      # Lima --plain guest; first boot pulls a cloud image
 ```
+
+Lima guests (`just vm-up`, `just vm-ssh`, `just vm-test`) need `limactl`,
+`qemu-system-x86_64`, and a writable `/dev/kvm` (usually the `kvm` group).
+`limactl` must not run as root. Templates live in `vm/lima/` (`debian`,
+`archlinux`, `ubuntu-26.04`). Supported targets: Debian 13 (trixie), Ubuntu 26.04 (resolute),
+and current Arch Linux. The checkout is copied over SSH; it is not
+mounted from the host.
 
 Integration layout:
 

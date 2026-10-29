@@ -1,0 +1,54 @@
+# Lima --plain guest: Arch Linux (merged-usr, current pasta/bwrap).
+minimumLimaVersion: 2.0.0
+base:
+- template:archlinux
+
+plain: true
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    user="{{.User}}"
+    core=(
+      python git rsync curl ca-certificates
+      bubblewrap passt slirp4netns nftables shadow
+    )
+    extra=(docker docker-buildx rootlesskit fuse-overlayfs)
+    missing=()
+    for p in "${core[@]}"; do
+      pacman -Qi "$p" >/dev/null 2>&1 || missing+=("$p")
+    done
+    if ((${#missing[@]})); then
+      pacman -Sy --noconfirm --needed "${missing[@]}"
+    fi
+    # One transaction per extra: a single unavailable package (e.g. one that
+    # moved to the AUR) must not take docker down with it.
+    for p in "${extra[@]}"; do
+      pacman -Qi "$p" >/dev/null 2>&1 && continue
+      pacman -S --noconfirm --needed "$p" || echo "WARN: optional package $p not installed" >&2
+    done
+    if ! grep -q "^${user}:" /etc/subuid; then
+      echo "${user}:100000:65536" >> /etc/subuid
+    fi
+    if ! grep -q "^${user}:" /etc/subgid; then
+      echo "${user}:100000:65536" >> /etc/subgid
+    fi
+    # Rootful engine for docker-proxy e2e; the guest user talks to the socket.
+    if command -v dockerd >/dev/null 2>&1; then
+      getent group docker >/dev/null || groupadd docker
+      id -nG "${user}" | tr ' ' '\n' | grep -qx docker || usermod -aG docker "${user}"
+      systemctl enable --now docker.socket docker.service || true
+    fi
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export PATH="${HOME}/.local/bin:${PATH}"
+    if ! command -v uv >/dev/null 2>&1; then
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+    fi

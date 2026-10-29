@@ -1,0 +1,63 @@
+# Lima --plain guest: Debian 13 (AppArmor bwrap, /usr/sbin, distro pasta).
+minimumLimaVersion: 2.0.0
+base:
+- template:debian-13
+
+plain: true
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    user="{{.User}}"
+    core=(
+      python3 python3-venv python3-pip curl git rsync ca-certificates
+      bubblewrap passt slirp4netns nftables uidmap
+    )
+    extra=(docker.io docker-buildx rootlesskit fuse-overlayfs)
+    missing=()
+    for p in "${core[@]}"; do
+      dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null | grep -q "ok installed" \
+        || missing+=("$p")
+    done
+    if ((${#missing[@]})); then
+      apt-get update
+      apt-get install -y "${missing[@]}"
+    fi
+    extra_missing=()
+    for p in "${extra[@]}"; do
+      dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null | grep -q "ok installed" \
+        || extra_missing+=("$p")
+    done
+    if ((${#extra_missing[@]})); then
+      apt-get update
+      # One install per extra so a missing optional package does not skip docker.
+      for p in "${extra_missing[@]}"; do
+        apt-get install -y "$p" || echo "WARN: optional package $p not installed" >&2
+      done
+    fi
+    if ! grep -q "^${user}:" /etc/subuid; then
+      echo "${user}:100000:65536" >> /etc/subuid
+    fi
+    if ! grep -q "^${user}:" /etc/subgid; then
+      echo "${user}:100000:65536" >> /etc/subgid
+    fi
+    # Rootful engine for docker-proxy e2e; the guest user talks to the socket.
+    if command -v dockerd >/dev/null 2>&1; then
+      getent group docker >/dev/null || groupadd docker
+      id -nG "${user}" | tr ' ' '\n' | grep -qx docker || usermod -aG docker "${user}"
+      systemctl enable --now docker.socket docker.service || true
+    fi
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export PATH="${HOME}/.local/bin:${PATH}"
+    if ! command -v uv >/dev/null 2>&1; then
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+    fi

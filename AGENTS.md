@@ -23,6 +23,27 @@ A sandboxed run is not the full suite. Before creating a commit, ask the
 user to run the complete suite on the host (no ``-m "not e2e"``) and wait
 for that result.
 
+## Lima multi-OS e2e
+
+``just vm-*`` and ``just debug-log vm …`` need a real host with ``limactl``,
+QEMU, and ``/dev/kvm``. Do not start Lima from the agent sandbox.
+
+Supported targets only: Debian 13 trixie (``debian``, default; ``trixie``),
+Ubuntu 26.04 resolute (``ubuntu-26.04``; ``ubuntu``, ``resolute``), and current
+Arch Linux (``archlinux``; ``arch``), or ``all``. Older releases are out of scope.
+The wrapper is ``scripts/vm``. Debug over SSH with ``just vm-ssh debian``.
+
+## Host log for the debug-loop
+
+Ask the user to paste one of these on the host (not in the sandbox). Extra
+pytest args go after ``--``::
+
+   just debug-log                     # local full suite → debug.log
+   just debug-log -- -m e2e
+   just debug-log vm                  # Lima debian
+   just debug-log vm debian -- -m e2e
+   just debug-log vm all
+
 ## Lint and typecheck before commit
 
 Before creating a commit, run both and fix any findings::
