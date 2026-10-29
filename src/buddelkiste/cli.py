@@ -594,6 +594,11 @@ def run(
     from buddelkiste.dbus_proxy import dbus_proxy_cli_context
     from buddelkiste.docker_instance import instance_cli_overrides
 
+    # Refuse feature/mount/env conflicts before feature_setup starts proxies or
+    # daemons (e.g. docker-proxy needs a live socket; docker + docker-proxy must
+    # still report the mutex on hosts without Docker).
+    check_launch_conflicts(enabled=enabled, config=config, binds=binds)
+
     with (
         instance_cli_overrides(
             remove_data_on_teardown=docker_instance_remove_data,
