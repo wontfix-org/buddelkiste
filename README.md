@@ -715,7 +715,8 @@ Lima guests (`just vm-up`, `just vm-ssh`, `just vm-test`) need `limactl`,
 `limactl` must not run as root. Templates live in `vm/lima/` (`debian`,
 `archlinux`, `ubuntu-26.04`). Supported targets: Debian 13 (trixie), Ubuntu 26.04 (resolute),
 and current Arch Linux. The checkout is copied over SSH; it is not
-mounted from the host.
+mounted from the host. The Ubuntu guest installs the `buddelkiste-unshare`
+AppArmor profile from the section above, so the slirp4netns tests run there.
 
 Integration layout:
 

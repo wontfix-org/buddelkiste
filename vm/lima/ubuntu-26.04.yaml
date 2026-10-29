@@ -1,4 +1,4 @@
-# Lima --plain guest: Ubuntu 26.04 LTS (systemd-resolved stub, AppArmor, current LTS).
+# Lima --plain guest: Ubuntu 26.04 LTS (resolved stub, AppArmor, buddelkiste-unshare profile).
 minimumLimaVersion: 2.0.0
 base:
 - template:ubuntu-26.04
@@ -47,6 +47,22 @@ provision:
     if ! grep -q "^${user}:" /etc/subgid; then
       echo "${user}:100000:65536" >> /etc/subgid
     fi
+    # README "Ubuntu: slirp4netns and AppArmor" profile; keep the two in sync.
+    profile=/etc/apparmor.d/buddelkiste-unshare
+    cat > "${profile}.new" <<'EOF'
+    # Allow util-linux unshare to create unprivileged user namespaces
+    # (buddelkiste network.backend = "slirp4netns" on Ubuntu 23.10+).
+    abi <abi/4.0>,
+    include <tunables/global>
+
+    profile buddelkiste-unshare /usr/bin/unshare flags=(unconfined) {
+      userns,
+
+      include if exists <local/buddelkiste-unshare>
+    }
+    EOF
+    mv "${profile}.new" "${profile}"
+    apparmor_parser -r "${profile}"
     # Rootful engine for docker-proxy e2e; the guest user talks to the socket.
     if command -v dockerd >/dev/null 2>&1; then
       getent group docker >/dev/null || groupadd docker
