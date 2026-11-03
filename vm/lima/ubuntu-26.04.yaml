@@ -17,7 +17,7 @@ provision:
     user="{{.User}}"
     core=(
       python3 python3-venv python3-pip curl git rsync ca-certificates
-      bubblewrap passt slirp4netns nftables uidmap
+      bubblewrap passt nftables uidmap
     )
     extra=(docker.io docker-buildx rootlesskit fuse-overlayfs)
     missing=()
@@ -47,11 +47,11 @@ provision:
     if ! grep -q "^${user}:" /etc/subgid; then
       echo "${user}:100000:65536" >> /etc/subgid
     fi
-    # README "Ubuntu: slirp4netns and AppArmor" profile; keep the two in sync.
+    # Nested unshare --user tests need this; bwrap and pasta ship their own profiles.
     profile=/etc/apparmor.d/buddelkiste-unshare
     cat > "${profile}.new" <<'EOF'
     # Allow util-linux unshare to create unprivileged user namespaces
-    # (buddelkiste network.backend = "slirp4netns" on Ubuntu 23.10+).
+    # (Ubuntu 23.10+ restricts unprivileged user namespaces).
     abi <abi/4.0>,
     include <tunables/global>
 

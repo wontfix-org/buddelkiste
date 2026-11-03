@@ -17,7 +17,7 @@ provision:
     user="{{.User}}"
     core=(
       python3 python3-venv python3-pip curl git rsync ca-certificates
-      bubblewrap passt slirp4netns nftables uidmap
+      bubblewrap passt nftables uidmap
     )
     extra=(docker.io docker-buildx rootlesskit fuse-overlayfs)
     missing=()

@@ -14,13 +14,9 @@ from buddelkiste.network import NetworkConfig, run_network_inner
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
-    start_slirp = False
-    if "--start-slirp" in argv:
-        argv.remove("--start-slirp")
-        start_slirp = True
 
     if len(argv) != 2:
-        raise SystemExit("usage: python -m buddelkiste.network_inner NET.json BWRAP.json [--start-slirp]")
+        raise SystemExit("usage: python -m buddelkiste.network_inner NET.json BWRAP.json")
 
     configure_debug_logging_from_env(log_format=NETNS_LOG_FORMAT)
 
@@ -37,7 +33,7 @@ def main(argv: list[str] | None = None) -> None:
         deny_presets=list(net_data.get("deny_presets", [])),
     )
     try:
-        raise SystemExit(run_network_inner(net, bwrap_args, start_slirp=start_slirp))
+        raise SystemExit(run_network_inner(net, bwrap_args))
     except click.ClickException as exc:
         click.echo(f"Error: {exc.format_message()}", err=True)
         raise SystemExit(1) from exc

@@ -3,7 +3,7 @@
 Run a command in a rootless sandbox (`bk`): filesystem and process isolation
 via [bubblewrap](https://github.com/containers/bubblewrap), plus optional
 network controls — share the host stack, cut connectivity entirely, or filter
-egress with pasta/slirp4netns and in-namespace nftables (IP/CIDR and hostname
+egress with pasta and in-namespace nftables (IP/CIDR and hostname
 rules, no root required).
 
 ## Usage
@@ -35,7 +35,6 @@ bk run --feature cursor --feature gui cursor-agent
 bk run --network host …                 # share host network
 bk run --network none …                 # no connectivity
 bk run --network filter \
-  --net-backend pasta \
   --net-policy deny \
   --net-allow 1.1.1.1/32 \
   --net-allow api.github.com \
@@ -44,7 +43,7 @@ bk run --network filter \
 ```
 
 `bk run` wrapper options: `--debug`, `--debug-file`, `--feature` / `--no-feature`,
-`--network`, `--network-backend`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
+`--network`, `--net-policy`, `--net-allow`, `--net-allow-preset`,
 `--net-deny`, `--net-deny-preset`,
 `--dbus-see`, `--dbus-talk`, `--dbus-own`, `--dbus-call`, `--dbus-broadcast`.
 Everything else is the sandboxed command. `--debug` logs to stderr.
@@ -206,8 +205,7 @@ images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
 # Project-local rootless daemon (docker-instance feature; default off)
 # [docker_instance]
 # fs = "project"       # host | project | data
-# net = "userspace"    # host | userspace | none
-# net_backend = "slirp4netns"  # or pasta / slirp
+# net = "userspace"    # host | userspace | none (userspace uses pasta)
 # # data_root = "$XDG_DATA_HOME/buddelkiste/docker-instance/myproj"
 # # fs_allow = ["$HOME/.cache/go-build"]
 # # [docker_instance.policy]
@@ -244,10 +242,10 @@ name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
 
 [network]
-# Defaults: mode = "filter", backend = "pasta", policy = "allow",
+# Defaults: mode = "filter", policy = "allow",
 # deny_presets = ["internal", "localhost"] (RFC1918/ULA + loopback).
+# Filter mode always uses pasta.
 mode = "filter"
-backend = "pasta"  # or slirp4netns (alias: slirp)
 policy = "allow"
 allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
 deny = ["203.0.113.0/24"]
@@ -585,8 +583,8 @@ mode `000`; `bk docker-instance prune` (and teardown wipe) chmod them so they
 can be deleted.
 
 Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
-`/etc/subgid` entries for your user; for `net = "userspace"` the configured
-`net_backend` (`slirp4netns` by default, or `pasta`). Storage defaults to
+`/etc/subgid` entries for your user; for `net = "userspace"`, `pasta` (from
+`passt`). Storage defaults to
 whatever dockerd picks (`auto`);
 set `storage_driver` (or `--docker-instance-storage-driver`) to `overlay2`,
 `fuse-overlayfs`, or `vfs`. Do not switch drivers on a non-empty `data_root`
@@ -605,8 +603,7 @@ features = { docker = false, docker-instance = true }
 
 [docker_instance]
 fs = "project"          # host | project | data — daemon mount namespace
-net = "userspace"       # host | userspace | none
-# net_backend = "slirp4netns"  # or pasta / slirp; no fallback
+net = "userspace"       # host | userspace | none (userspace uses pasta)
 # data_root = "/path/to/store"
 # fs_allow = ["$HOME/.cache/go-build"]
 proxy = true            # agent sees only the filtered proxy socket
@@ -628,7 +625,7 @@ proxy = true            # agent sees only the filtered proxy socket
 
 | `net` | Behaviour |
 |-------|-----------|
-| `userspace` (default) | rootlesskit via `net_backend` (slirp4netns default, or pasta); dockerd iptables+forward on so bridge containers can use DNS/egress |
+| `userspace` (default) | rootlesskit via pasta; dockerd iptables+forward on so bridge containers can use DNS/egress |
 | `host` | Share host network with the daemon helper |
 | `none` | No network for the daemon helper |
 
@@ -641,10 +638,8 @@ this private store. BuildKit via the Docker CLI also needs a working
 
 ## Network filter dependencies
 
-`network.mode = "filter"` needs the configured **`network.backend`** helper
-(**pasta** from `passt` by default, or **slirp4netns**), plus **nft** and
-**setpriv**. The other helper is not tried. No root and no reserved host
-subnets are required.
+`network.mode = "filter"` needs **pasta** (from `passt`), plus **nft** and
+**setpriv**. No root and no reserved host subnets are required.
 Hostname rules start a DNS proxy that redirects UDP/53 and updates dynamic
 nftables allow sets from resolved A/AAAA records. Default policy is `allow`:
 public egress is accepted, and the `internal` and `localhost` deny presets
@@ -654,48 +649,6 @@ because a base chain cannot use `reject` as its policy. When resolv.conf is
 only a loopback stub, sandbox DNS is relayed to that stub from the host netns
 and systemd-resolved chooses the uplinks. Other nameserver IPs from
 `/etc/resolv.conf` are auto-allowed so DNS still works under that deny policy.
-
-### Ubuntu: slirp4netns and AppArmor
-
-Ubuntu 23.10 and later (including 26.04) set
-`kernel.apparmor_restrict_unprivileged_userns=1`. Only binaries with an
-AppArmor profile that grants `userns` may create user namespaces. `bwrap` and
-`pasta` ship such profiles, so the default `pasta` backend works out of the box.
-The `slirp4netns` backend starts its namespace with util-linux `unshare`, which
-has no profile, and fails with:
-
-```text
-unshare: write failed /proc/self/uid_map: Operation not permitted
-```
-
-Either keep `backend = "pasta"`, or install this profile as
-`/etc/apparmor.d/buddelkiste-unshare`:
-
-```text
-# Allow util-linux unshare to create unprivileged user namespaces
-# (buddelkiste network.backend = "slirp4netns" on Ubuntu 23.10+).
-abi <abi/4.0>,
-include <tunables/global>
-
-profile buddelkiste-unshare /usr/bin/unshare flags=(unconfined) {
-  userns,
-
-  include if exists <local/buddelkiste-unshare>
-}
-```
-
-Load it and check:
-
-```bash
-sudo apparmor_parser -r /etc/apparmor.d/buddelkiste-unshare
-unshare --user --map-root-user --net true && echo ok
-```
-
-The profile applies to every caller of `/usr/bin/unshare`, not only
-buddelkiste: any local user can then create user namespaces through it, which
-is the attack surface the Ubuntu default restricts. Remove it with
-`sudo apparmor_parser -R /etc/apparmor.d/buddelkiste-unshare` and delete the
-file.
 
 ## Development
 
@@ -715,14 +668,14 @@ Lima guests (`just vm-up`, `just vm-ssh`, `just vm-test`) need `limactl`,
 `limactl` must not run as root. Templates live in `vm/lima/` (`debian`,
 `archlinux`, `ubuntu-26.04`). Supported targets: Debian 13 (trixie), Ubuntu 26.04 (resolute),
 and current Arch Linux. The checkout is copied over SSH; it is not
-mounted from the host. The Ubuntu guest installs the `buddelkiste-unshare`
-AppArmor profile from the section above, so the slirp4netns tests run there.
+mounted from the host. The Ubuntu guest installs a `buddelkiste-unshare`
+AppArmor profile so nested `unshare --user` tests can create user namespaces.
 
 Integration layout:
 
 - `tests/` — unit/contract tests (mocked subprocess where needed)
 - `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation; nested `nft`/netns cases are marked `e2e`
-- `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); marked `e2e`
+- `tests/integ_net/` — filter-mode e2e via pasta (allow/deny IP & host, guest caps); marked `e2e`
 - `tests/integ_docker/` — docker-proxy / docker-instance e2e; marked `e2e`
 
 ## Release

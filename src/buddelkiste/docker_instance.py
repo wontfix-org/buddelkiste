@@ -34,7 +34,6 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
-from buddelkiste.network import normalize_net_backend
 from buddelkiste.which import log_cmdline, path_with_tools, which
 
 log = logging.getLogger(__name__)
@@ -52,7 +51,6 @@ def daemon_tool_path(base: str | None = None) -> str:
 
 FS_MODES = frozenset({"host", "project", "data"})
 NET_MODES = frozenset({"host", "userspace", "none"})
-DEFAULT_NET_BACKEND = "slirp4netns"
 STORAGE_DRIVERS = frozenset({"auto", "overlay2", "fuse-overlayfs", "vfs"})
 
 # Instance defaults: allow build + BuildKit /session; deny other high-risk APIs.
@@ -91,7 +89,6 @@ class DockerInstanceConfig:
     fs: str = "project"
     fs_allow: tuple[str, ...] = ()
     net: str = "userspace"
-    net_backend: str = DEFAULT_NET_BACKEND
     proxy: bool = True
     remove_data_on_teardown: bool = False
     storage_driver: str = "auto"
@@ -129,10 +126,6 @@ def _apply_cli_overrides(cfg: DockerInstanceConfig) -> DockerInstanceConfig:
     if "storage_driver" in raw:
         updates["storage_driver"] = parse_storage_driver(
             raw["storage_driver"], where="--docker-instance-storage-driver"
-        )
-    if "net_backend" in raw:
-        updates["net_backend"] = normalize_net_backend(
-            raw["net_backend"], where="--docker-instance-net-backend"
         )
     return replace(cfg, **updates) if updates else cfg
 
@@ -360,10 +353,6 @@ def config_from_mapping(
         raise click.ClickException(
             f"{where}.net must be one of {sorted(NET_MODES)} (got {net!r})"
         )
-    net_backend = normalize_net_backend(
-        data.get("net_backend", DEFAULT_NET_BACKEND),
-        where=f"{where}.net_backend",
-    )
 
     fs_allow_raw = data.get("fs_allow", [])
     if not isinstance(fs_allow_raw, list):
@@ -394,7 +383,6 @@ def config_from_mapping(
         "fs",
         "fs_allow",
         "net",
-        "net_backend",
         "proxy",
         "remove_data_on_teardown",
         "storage_driver",
@@ -409,7 +397,6 @@ def config_from_mapping(
         fs=fs,
         fs_allow=fs_allow,
         net=net,
-        net_backend=net_backend,
         proxy=proxy,
         remove_data_on_teardown=remove_data_on_teardown,
         storage_driver=storage_driver,
@@ -455,7 +442,7 @@ def check_rootless_prerequisites() -> None:
             "docker-instance requires: "
             + ", ".join(missing)
             + " (Arch: pacman -S docker rootlesskit shadow bubblewrap; "
-            "also fuse-overlayfs and slirp4netns/passt recommended)"
+            "also fuse-overlayfs and passt recommended)"
         )
     user = _username()
     for label, path in (
@@ -486,36 +473,31 @@ def expand_fs_allow(paths: Sequence[str]) -> list[Path]:
     return result
 
 
-def rootlesskit_net_args(
-    net: str, backend: str = DEFAULT_NET_BACKEND
-) -> list[str]:
+def rootlesskit_net_args(net: str) -> list[str]:
     """Map ``net`` mode to rootlesskit ``--net=…`` and related flags."""
     # Always copy-up /etc and /run so dockerd can create /run/docker (plugins).
     common = [
         "--disable-host-loopback",
-        "--port-driver=builtin",
         "--copy-up=/etc",
         "--copy-up=/run",
         "--propagation=rslave",
     ]
     if net == "host":
-        return ["--net=host", *common]
+        return ["--net=host", "--port-driver=builtin", *common]
     if net == "none":
-        return ["--net=none", *common]
-    kind = normalize_net_backend(backend, where="docker_instance.net_backend")
-    path = which(kind)
-    if not path:
-        raise click.ClickException(
-            f"docker-instance net=userspace needs {kind} on PATH"
-        )
-    return [f"--net={kind}", *common]
+        return ["--net=none", "--port-driver=builtin", *common]
+    if which("pasta") is None:
+        raise click.ClickException("docker-instance net=userspace needs pasta on PATH")
+    # pasta rejects the builtin port driver. implicit lets pasta expose ports
+    # the child listens on, which is how ``docker run -p`` is published.
+    return ["--net=pasta", "--port-driver=implicit", *common]
 
 
 def host_dns_servers(resolv: Path | None = None) -> list[str]:
     """IPv4 nameservers from host resolv.conf (skip loopback / IPv6).
 
     Injected as dockerd ``--dns`` so build/run containers do not rely solely on
-    slirp's ``10.0.2.3`` forwarder (which still needs bridge NAT via iptables).
+    the userspace helper's built-in DNS (which still needs bridge NAT via iptables).
     """
     path = resolv or Path("/etc/resolv.conf")
     try:
@@ -637,7 +619,6 @@ def build_dockerd_command(
     runtime_dir: Path,
     fs_allow: Sequence[Path],
     storage_driver: str = "auto",
-    net_backend: str = DEFAULT_NET_BACKEND,
 ) -> list[str]:
     """Full argv to launch rootless dockerd (optional bwrap + rootlesskit)."""
     data_root.mkdir(parents=True, exist_ok=True)
@@ -654,8 +635,8 @@ def build_dockerd_command(
     driver = parse_storage_driver(storage_driver, where="storage_driver")
     if driver != "auto":
         dockerd.append(f"--storage-driver={driver}")
-    # Bridge containers need iptables MASQUERADE + ip_forward to reach slirp
-    # (10.0.2.3 DNS / default gw). Without them, pulls from dockerd still work
+    # Bridge containers need iptables MASQUERADE + ip_forward to reach the
+    # userspace network helper. Without them, pulls from dockerd still work
     # (daemon is in the rootlesskit netns) but RUN apt-get / DNS inside builds fail.
     if net == "none":
         dockerd.extend(["--iptables=false", "--ip-forward=false"])
@@ -694,7 +675,7 @@ def build_dockerd_command(
     return [
         "rootlesskit",
         f"--state-dir={exec_root / 'rootlesskit'}",
-        *rootlesskit_net_args(net, net_backend),
+        *rootlesskit_net_args(net),
         *inner,
     ]
 
@@ -849,7 +830,6 @@ def docker_instance_setup(
         pidfile=pidfile,
         sock=daemon_sock,
         net=cfg.net,
-        net_backend=cfg.net_backend,
         fs=cfg.fs,
         project=project,
         runtime_dir=short_base,

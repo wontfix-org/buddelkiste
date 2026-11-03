@@ -3,8 +3,7 @@
 Filter mode gives the sandbox its own netns, so ``127.0.0.1`` there is not the
 host where rootlesskit's port driver listens. Tests dial the published host
 port on ``127.0.0.1``. This relay binds that address inside the sandbox and
-connects out through the port gateway (pasta's mapped host loopback, or
-slirp's ``10.0.2.2``).
+connects out through the port gateway (pasta's mapped host loopback).
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ log = logging.getLogger(__name__)
 PORT_GATEWAY_ENV = "BUDDELKISTE_HOST_PORT_GATEWAY"
 DOCKER_HOST_ENV = "BUDDELKISTE_DOCKER_HOST"
 PASTA_PORT_GATEWAY = "169.254.255.254"
-SLIRP_PORT_GATEWAY = "10.0.2.2"
 
 
 def sandbox_docker_host(bwrap_args: list[str]) -> str | None:

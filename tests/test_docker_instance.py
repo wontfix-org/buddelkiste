@@ -36,7 +36,6 @@ def test_config_defaults() -> None:
     cfg = load_instance_config({})
     assert cfg.fs == "project"
     assert cfg.net == "userspace"
-    assert cfg.net_backend == "slirp4netns"
     assert cfg.proxy is True
     assert cfg.remove_data_on_teardown is False
     assert cfg.storage_driver == "auto"
@@ -53,7 +52,6 @@ def test_config_from_mapping_overrides(tmp_path: Path) -> None:
             "data_root": str(tmp_path / "store"),
             "fs": "data",
             "net": "none",
-            "net_backend": "pasta",
             "proxy": False,
             "remove_data_on_teardown": True,
             "storage_driver": "fuse-overlayfs",
@@ -67,7 +65,6 @@ def test_config_from_mapping_overrides(tmp_path: Path) -> None:
     assert cfg.data_root == tmp_path / "store"
     assert cfg.fs == "data"
     assert cfg.net == "none"
-    assert cfg.net_backend == "pasta"
     assert cfg.proxy is False
     assert cfg.remove_data_on_teardown is True
     assert cfg.storage_driver == "fuse-overlayfs"
@@ -81,8 +78,8 @@ def test_config_rejects_bad_fs_net() -> None:
         config_from_mapping({"fs": "jail"})
     with pytest.raises(click.ClickException, match="net must be"):
         config_from_mapping({"net": "bridge"})
-    with pytest.raises(click.ClickException, match="net_backend"):
-        config_from_mapping({"net_backend": "wireguard"})
+    with pytest.raises(click.ClickException, match="unknown keys: net_backend"):
+        config_from_mapping({"net_backend": "pasta"})
     with pytest.raises(click.ClickException, match="unknown keys"):
         config_from_mapping({"extra": 1})
     with pytest.raises(click.ClickException, match="storage_driver"):
@@ -107,28 +104,17 @@ def test_rootlesskit_net_args(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--copy-up=/run" in none
     monkeypatch.setattr(
         "buddelkiste.docker_instance.which",
-        lambda name: "/usr/bin/slirp4netns" if name == "slirp4netns" else None,
-    )
-    userspace = rootlesskit_net_args("userspace")
-    assert "--net=slirp4netns" in userspace
-    assert "--disable-host-loopback" in userspace
-    assert "--port-driver=builtin" in userspace
-    assert "--propagation=rslave" in userspace
-    monkeypatch.setattr(
-        "buddelkiste.docker_instance.which",
         lambda name: "/usr/bin/pasta" if name == "pasta" else None,
     )
-    assert "--net=pasta" in rootlesskit_net_args("userspace", "pasta")
-    monkeypatch.setattr(
-        "buddelkiste.docker_instance.which",
-        lambda name: "/usr/bin/slirp4netns" if name == "slirp4netns" else None,
-    )
-    assert "--net=slirp4netns" in rootlesskit_net_args("userspace", "slirp")
+    userspace = rootlesskit_net_args("userspace")
+    assert "--net=pasta" in userspace
+    assert "--disable-host-loopback" in userspace
+    assert "--port-driver=implicit" in userspace
+    assert "--port-driver=builtin" not in userspace
+    assert "--propagation=rslave" in userspace
     monkeypatch.setattr("buddelkiste.docker_instance.which", lambda name: None)
-    with pytest.raises(click.ClickException, match="slirp4netns"):
+    with pytest.raises(click.ClickException, match="needs pasta on PATH"):
         rootlesskit_net_args("userspace")
-    with pytest.raises(click.ClickException, match="pasta"):
-        rootlesskit_net_args("userspace", "pasta")
 
 
 def test_minimal_ro_binds_include_subid() -> None:
@@ -198,7 +184,7 @@ def test_build_dockerd_command_project_jail_includes_subid(
 ) -> None:
     monkeypatch.setattr(
         "buddelkiste.docker_instance.rootlesskit_net_args",
-        lambda net, backend="pasta": ["--net=pasta", "--disable-host-loopback"],
+        lambda net: ["--net=pasta", "--disable-host-loopback"],
     )
     real_exists = Path.exists
 
@@ -296,7 +282,7 @@ def test_build_dockerd_command_includes_rootlesskit(
 ) -> None:
     monkeypatch.setattr(
         "buddelkiste.docker_instance.rootlesskit_net_args",
-        lambda net, backend="pasta": ["--net=pasta"],
+        lambda net: ["--net=pasta"],
     )
     monkeypatch.setattr(
         "buddelkiste.docker_instance.host_dns_servers",
@@ -330,7 +316,7 @@ def test_build_dockerd_command_with_fs_jail(
 ) -> None:
     monkeypatch.setattr(
         "buddelkiste.docker_instance.rootlesskit_net_args",
-        lambda net, backend="slirp4netns": ["--net=none"],
+        lambda net: ["--net=none"],
     )
     cmd = build_dockerd_command(
         data_root=tmp_path / "data",
@@ -357,7 +343,7 @@ def test_build_dockerd_command_storage_driver(
 ) -> None:
     monkeypatch.setattr(
         "buddelkiste.docker_instance.rootlesskit_net_args",
-        lambda net, backend="slirp4netns": ["--net=none"],
+        lambda net: ["--net=none"],
     )
     cmd = build_dockerd_command(
         data_root=tmp_path / "data",
@@ -712,9 +698,6 @@ def test_cli_overrides_remove_data_on_teardown() -> None:
     with instance_cli_overrides(storage_driver="overlay2"):
         assert _apply_cli_overrides(cfg).storage_driver == "overlay2"
     assert _apply_cli_overrides(cfg).storage_driver == "auto"
-    with instance_cli_overrides(net_backend="pasta"):
-        assert _apply_cli_overrides(cfg).net_backend == "pasta"
-    assert _apply_cli_overrides(cfg).net_backend == "slirp4netns"
 
 
 def test_docker_instance_setup_removes_data_on_teardown(

@@ -3,7 +3,7 @@
 Modes:
   host   — share the host network (default; current behavior)
   none   — private empty netns (no connectivity)
-  filter — private netns via pasta/slirp4netns with in-namespace nftables.
+  filter — private netns via pasta with in-namespace nftables.
            Default policy is allow (public egress). Private ranges and
            loopback are denied.
 
@@ -19,13 +19,11 @@ import ipaddress
 import json
 import logging
 import os
-import select
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from io import BufferedIOBase
@@ -45,7 +43,6 @@ from buddelkiste.published_ports import (
     DOCKER_HOST_ENV,
     PASTA_PORT_GATEWAY,
     PORT_GATEWAY_ENV,
-    SLIRP_PORT_GATEWAY,
     PublishedPortRelay,
     sandbox_docker_host,
 )
@@ -124,9 +121,6 @@ def _pasta_debug_launch(tmp_path: Path) -> tuple[list[str], str, bool]:
 
 NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
-NETWORK_BACKENDS = ("pasta", "slirp4netns")
-NETWORK_BACKEND_ALIASES = {"slirp": "slirp4netns"}
-DEFAULT_NET_BACKEND = "pasta"
 
 # Named deny helpers expanded into concrete CIDRs at resolve time.
 _PRIVATE_CIDRS = (
@@ -156,33 +150,10 @@ DENY_PRESETS: dict[str, tuple[str, ...]] = {
 # Default filter deny list: internal (RFC1918/ULA) and loopback.
 DEFAULT_DENY_PRESETS: tuple[str, ...] = ("internal", "localhost")
 
-# When set to pasta or slirp4netns, filter mode uses that backend if config
-# and --net-backend do not pick one.
-NET_HELPER_ENV = "BUDDELKISTE_NET_HELPER"
-
-
-def normalize_net_backend(raw: object, *, where: str) -> str:
-    """Return pasta or slirp4netns; ``slirp`` is an alias for slirp4netns."""
-    value = str(raw).strip().lower()
-    value = NETWORK_BACKEND_ALIASES.get(value, value)
-    if value not in NETWORK_BACKENDS:
-        allowed = ", ".join((*NETWORK_BACKENDS, *NETWORK_BACKEND_ALIASES))
-        raise click.ClickException(f"Invalid {where}: {raw!r} (expected {allowed})")
-    return value
-
-
-def default_net_backend() -> str:
-    """Pasta, unless ``BUDDELKISTE_NET_HELPER`` pins slirp4netns or pasta."""
-    forced = os.environ.get(NET_HELPER_ENV)
-    if not forced:
-        return DEFAULT_NET_BACKEND
-    return normalize_net_backend(forced, where=NET_HELPER_ENV)
-
 
 @dataclass
 class NetworkConfig:
     mode: str = "filter"
-    backend: str = DEFAULT_NET_BACKEND
     policy: str = "allow"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
@@ -223,7 +194,6 @@ class NetworkConfig:
         deny_hosts = list(dict.fromkeys([*deny_hosts, *self.deny_hosts]))
         return NetworkConfig(
             mode=self.mode,
-            backend=normalize_net_backend(self.backend, where="network.backend"),
             policy=self.policy,
             allow=allow_cidrs,
             deny=deny_cidrs,
@@ -373,11 +343,10 @@ def parse_network_table(
         )
 
     if "backend" in data:
-        backend = normalize_net_backend(
-            data["backend"], where=f"network.backend {where}"
+        raise click.ClickException(
+            f"network.backend {where} is no longer supported; filter mode uses "
+            "pasta only, so remove the key"
         )
-    else:
-        backend = default_net_backend()
 
     policy = data.get("policy", "allow")
     if policy not in NETWORK_POLICIES:
@@ -406,7 +375,6 @@ def parse_network_table(
 
     cfg = NetworkConfig(
         mode=mode,
-        backend=backend,
         policy=policy,
         allow=[str(x) for x in allow],
         deny=[str(x) for x in deny],
@@ -443,7 +411,6 @@ def resolve_network(
     *,
     executable: str | None = None,
     mode: str | None = None,
-    backend: str | None = None,
     policy: str | None = None,
     allow: Sequence[str] = (),
     deny: Sequence[str] = (),
@@ -455,7 +422,7 @@ def resolve_network(
     Precedence: defaults → global [network] → per-executable network → CLI flags.
     CLI ``--net-allow`` / ``--net-deny`` / ``--net-allow-preset`` /
     ``--net-deny-preset`` append to the lists; ``--network`` / ``--net-policy``
-    / ``--net-backend`` override mode/policy/backend when given.
+    override mode and policy when given.
 
     Filter mode is selected automatically when filtering options are used, unless
     ``--network`` (or an explicit config ``mode``) chooses another mode.
@@ -467,7 +434,7 @@ def resolve_network(
     registry = load_deny_preset_registry(config)
     network_table = _effective_network_table(config, executable)
     mode_from_config = bool(network_table and "mode" in network_table)
-    net = NetworkConfig(backend=default_net_backend())
+    net = NetworkConfig()
     if "network" in config:
         net = parse_network_table(config["network"], where="in config", registry=registry)
 
@@ -485,9 +452,6 @@ def resolve_network(
                 f"Invalid --network mode: {mode!r} (expected {', '.join(NETWORK_MODES)})"
             )
         net.mode = mode
-
-    if backend is not None:
-        net.backend = normalize_net_backend(backend, where="--net-backend")
 
     if policy is not None:
         if policy not in NETWORK_POLICIES:
@@ -790,31 +754,20 @@ def build_nft_ruleset(
     return "\n".join(lines) + "\n"
 
 
-def find_net_helper(backend: str | None = None) -> tuple[str, str]:
-    """Return ``(kind, path)`` for the configured userspace helper.
-
-    ``backend`` is pasta or slirp4netns (``slirp`` is accepted). When omitted,
-    ``BUDDELKISTE_NET_HELPER`` or the pasta default is used. The other helper
-    is not tried if the chosen one is missing.
-    """
-    if backend is None:
-        kind = default_net_backend()
-        where = NET_HELPER_ENV if os.environ.get(NET_HELPER_ENV) else "network.backend"
-    else:
-        kind = normalize_net_backend(backend, where="network.backend")
-        where = "network.backend"
-    path = which(kind)
+def find_net_helper() -> str:
+    """Return the path to pasta, the only filter-mode userspace helper."""
+    path = which("pasta")
     if not path:
-        raise click.ClickException(f"{where}={kind} requires {kind} on PATH")
-    return kind, path
+        raise click.ClickException("network.mode=filter requires pasta (passt) on PATH")
+    return path
 
 
-def ensure_filter_tools(backend: str | None = None) -> None:
+def ensure_filter_tools() -> None:
     if not which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
     if not which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
-    find_net_helper(backend)
+    find_net_helper()
 
 
 def with_share_net(bwrap_args: list[str]) -> list[str]:
@@ -872,104 +825,6 @@ def apply_nft_ruleset(ruleset: str) -> None:
         raise click.ClickException(f"failed to install nftables rules: {detail}")
 
 
-def _child_namespaces_ready(pid: int) -> bool:
-    """True once ``pid`` is in a user and network namespace other than ours."""
-    try:
-        own_user = os.readlink("/proc/self/ns/user")
-        own_net = os.readlink("/proc/self/ns/net")
-        return (
-            os.readlink(f"/proc/{pid}/ns/user") != own_user
-            and os.readlink(f"/proc/{pid}/ns/net") != own_net
-        )
-    except OSError:
-        return False
-
-
-def _wait_for_tap(name: str = "tap0", timeout: float = 5) -> None:
-    """Wait until slirp, running in the parent, has created ``name`` here."""
-    deadline = time.monotonic() + timeout
-    devs: list[str] = []
-    while time.monotonic() < deadline:
-        try:
-            lines = Path("/proc/net/dev").read_text(encoding="utf-8").splitlines()
-            devs = [line.split(":", 1)[0].strip() for line in lines[2:]]
-        except OSError:
-            devs = []
-        if name in devs:
-            return
-        time.sleep(0.05)
-    raise click.ClickException(f"timed out waiting for slirp4netns {name}")
-
-
-def start_slirp4netns(
-    slirp_bin: str,
-    *,
-    target_pid: int | None = None,
-    userns_path: str | None = None,
-    host_loopback: bool = False,
-) -> subprocess.Popen:
-    """Start slirp4netns and wait until it reports the tap is configured.
-
-    ``/sys/class/net`` is the host sysfs mount, so ``tap0`` inside the new
-    netns never shows up there. ``--ready-fd`` is slirp's own ready signal.
-    The process must run in the host netns: its NAT sockets are how guest
-    traffic leaves the machine. ``userns_path`` is required when the target
-    pid is in a user namespace this process is not part of.
-    """
-    pid = os.getpid() if target_pid is None else target_pid
-    read_fd, write_fd = os.pipe()
-    os.set_inheritable(write_fd, True)
-    argv = [
-        slirp_bin,
-        "--configure",
-        "--mtu=65520",
-    ]
-    # Published container ports listen on the host. With this flag, slirp drops
-    # every connection to that loopback, including the port relay. nft still
-    # rejects every other port on 10.0.2.2.
-    if not host_loopback:
-        argv.append("--disable-host-loopback")
-    if userns_path:
-        argv.extend(["--userns-path", userns_path])
-    argv.extend(["--ready-fd", str(write_fd), str(pid), "tap0"])
-    log_cmdline(argv, label="slirp4netns")
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            pass_fds=(write_fd,),
-        )
-    except Exception:
-        os.close(write_fd)
-        os.close(read_fd)
-        raise
-    os.close(write_fd)
-    try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")
-                raise click.ClickException(f"slirp4netns exited during startup: {err.strip()}")
-            remaining = max(0.0, deadline - time.monotonic())
-            readable, _, _ = select.select([read_fd], [], [], min(0.05, remaining))
-            if readable:
-                os.read(read_fd, 16)
-                if isinstance(proc.stderr, BufferedIOBase):
-                    relay_debug_stream(proc.stderr, "slirp4netns")
-                return proc
-        proc.terminate()
-        try:
-            proc.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate(timeout=1)
-        raise click.ClickException("timed out waiting for slirp4netns tap0")
-    finally:
-        os.close(read_fd)
-
-
 def spawn_bwrap_dropped(bwrap_args: list[str]) -> subprocess.Popen:
     """Start bwrap after dropping CAP_NET_ADMIN in the child only."""
     cmd = [
@@ -1003,32 +858,21 @@ def preseed_host_allows(hosts: Sequence[str]) -> None:
             nft_add_allow_ip(ip, 300)
 
 
-def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp: bool) -> int:
+def run_network_inner(net: NetworkConfig, bwrap_args: list[str]) -> int:
     """Apply filter rules in the current netns, run optional DNS proxy, spawn bwrap."""
     if not which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
     if not which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
 
-    slirp_proc = None
     proxy: DnsProxy | None = None
     nsswitch_override: Path | None = None
     resolv_override: Path | None = None
-    if start_slirp:
-        # The parent starts slirp4netns in the host netns and points it at
-        # this process. Waiting here keeps nftables off the interface until
-        # the tap exists.
-        _wait_for_tap()
 
     try:
         extra_allow = resolv_conf_nameservers()
         upstreams = nameserver_ips()
         relay = os.environ.get(DNS_RELAY_ENV)
-        if start_slirp and not relay:
-            # slirp4netns built-in DNS, used only when the host has no stub relay.
-            extra_allow.append("10.0.2.3/32")
-            if "10.0.2.3" not in upstreams:
-                upstreams.append("10.0.2.3")
 
         # Hostname rules need the proxy so answers can update nft. A resolv.conf
         # that is only the systemd stub cannot be dialed from this netns; the
@@ -1149,8 +993,6 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
     finally:
         if proxy is not None:
             proxy.stop()
-        if slirp_proc is not None and slirp_proc.poll() is None:
-            slirp_proc.terminate()
         if nsswitch_override is not None:
             try:
                 nsswitch_override.unlink(missing_ok=True)
@@ -1175,8 +1017,8 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
         return subprocess.run(bwrap_args, check=False).returncode
 
     # filter
-    ensure_filter_tools(net.backend)
-    kind, helper = find_net_helper(net.backend)
+    ensure_filter_tools()
+    helper = find_net_helper()
 
     with tempfile.TemporaryDirectory(prefix="buddelkiste-net-") as tmp:
         tmp_path = Path(tmp)
@@ -1219,111 +1061,60 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
         docker_host = sandbox_docker_host(bwrap_args)
         port_gateway = ""
         if docker_host:
-            port_gateway = PASTA_PORT_GATEWAY if kind == "pasta" else SLIRP_PORT_GATEWAY
+            port_gateway = PASTA_PORT_GATEWAY
             child_env[PORT_GATEWAY_ENV] = port_gateway
             child_env[DOCKER_HOST_ENV] = docker_host
 
         try:
-            if kind == "pasta":
-                # pasta's spawn execs the command from the new namespaces. Debian
-                # pasta 20250503 returns EACCES for a binary under a 0700 home
-                # (the venv interpreter). /bin/sh is executable by everyone and
-                # then execs the real argv, which newer pasta can do directly too.
-                extra, shell, pipe_stderr = _pasta_debug_launch(tmp_path)
-                cmd = [
-                    helper,
-                    *extra,
-                    # Skip the host IPv6 route scan and resolv.conf read. Without
-                    # these, pasta warns "No interfaces with usable IPv6 routes"
-                    # and "Couldn't get any nameserver address" and still
-                    # continues. The sandbox uses the DNS proxy, not pasta's
-                    # advertised resolvers.
-                    "--ipv4-only",
-                    "--dns",
-                    "none",
-                    "--search",
-                    "none",
-                    "--config-net",
-                    # Newer pasta replaced --disable-host-loopback with this.
-                    "--map-host-loopback",
-                    port_gateway or "none",
-                    "--",
-                    "/bin/sh",
-                    "-c",
-                    shell,
-                    "buddelkiste-pasta",
-                    *inner,
-                ]
-                log_cmdline(cmd, label="pasta")
-                if pipe_stderr:
-                    proc = subprocess.Popen(cmd, env=child_env, stderr=subprocess.PIPE)
-                    follower = None
-                    if isinstance(proc.stderr, BufferedIOBase):
-                        follower = relay_debug_stream(proc.stderr, "pasta")
-                    try:
-                        return proc.wait()
-                    finally:
-                        if follower is not None:
-                            follower.join(timeout=2)
-                if "--log-file" in extra:
-                    stop = threading.Event()
-                    follower = relay_debug_file(tmp_path / "pasta.log", "pasta", stop)
-                    try:
-                        return subprocess.run(cmd, check=False, env=child_env).returncode
-                    finally:
-                        stop.set()
-                        follower.join(timeout=2)
-                return subprocess.run(cmd, check=False, env=child_env).returncode
-
-            # slirp4netns must run in the host netns. Its NAT sockets are the
-            # guest's path out; starting it inside the new netns blackholes them.
-            # The child only waits for tap0, then installs nftables.
-            if not which("unshare"):
-                raise click.ClickException("network.mode=filter with slirp4netns requires unshare")
+            # pasta's spawn execs the command from the new namespaces. Debian
+            # pasta 20250503 returns EACCES for a binary under a 0700 home
+            # (the venv interpreter). /bin/sh is executable by everyone and
+            # then execs the real argv, which newer pasta can do directly too.
+            extra, shell, pipe_stderr = _pasta_debug_launch(tmp_path)
             cmd = [
-                "unshare",
-                "--user",
-                "--map-root-user",
-                "--net",
+                helper,
+                *extra,
+                # Skip the host IPv6 route scan and resolv.conf read. Without
+                # these, pasta warns "No interfaces with usable IPv6 routes"
+                # and "Couldn't get any nameserver address" and still
+                # continues. The sandbox uses the DNS proxy, not pasta's
+                # advertised resolvers.
+                "--ipv4-only",
+                "--dns",
+                "none",
+                "--search",
+                "none",
+                "--config-net",
+                # Newer pasta replaced --disable-host-loopback with this.
+                "--map-host-loopback",
+                port_gateway or "none",
                 "--",
+                "/bin/sh",
+                "-c",
+                shell,
+                "buddelkiste-pasta",
                 *inner,
-                "--start-slirp",
             ]
-            log_cmdline(cmd, label="unshare")
-            child = subprocess.Popen(cmd, env=child_env)
-            slirp_proc = None
-            try:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    if child.poll() is not None:
-                        return child.returncode
-                    if _child_namespaces_ready(child.pid):
-                        slirp_proc = start_slirp4netns(
-                            helper,
-                            target_pid=child.pid,
-                            userns_path=f"/proc/{child.pid}/ns/user",
-                            host_loopback=bool(port_gateway),
-                        )
-                        break
-                    time.sleep(0.02)
-                else:
-                    raise click.ClickException(
-                        "timed out waiting for the filter network namespace"
-                    )
-                return child.wait()
-            finally:
-                if slirp_proc is not None and slirp_proc.poll() is None:
-                    slirp_proc.terminate()
-                    try:
-                        slirp_proc.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        slirp_proc.kill()
-                if child.poll() is None:
-                    child.terminate()
-                    try:
-                        child.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        child.kill()
+            log_cmdline(cmd, label="pasta")
+            if pipe_stderr:
+                proc = subprocess.Popen(cmd, env=child_env, stderr=subprocess.PIPE)
+                follower = None
+                if isinstance(proc.stderr, BufferedIOBase):
+                    follower = relay_debug_stream(proc.stderr, "pasta")
+                try:
+                    return proc.wait()
+                finally:
+                    if follower is not None:
+                        follower.join(timeout=2)
+            if "--log-file" in extra:
+                stop = threading.Event()
+                follower = relay_debug_file(tmp_path / "pasta.log", "pasta", stop)
+                try:
+                    return subprocess.run(cmd, check=False, env=child_env).returncode
+                finally:
+                    stop.set()
+                    follower.join(timeout=2)
+            return subprocess.run(cmd, check=False, env=child_env).returncode
         finally:
             if relay is not None:
                 relay.stop()

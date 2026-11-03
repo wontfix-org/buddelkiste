@@ -53,14 +53,13 @@ host binary it would run.
 
 # Network
 
-Modes: filter (default; private netns via pasta or slirp4netns with
-in-namespace nftables IP/CIDR allow/deny), host (share host network), none
-(no connectivity). Filter mode needs no root and no reserved host subnets.
-The userspace helper is ``network.backend`` / ``--net-backend`` (pasta by
-default; slirp4netns, alias slirp). The other helper is not tried.
+Modes: filter (default; private netns via pasta with in-namespace nftables
+IP/CIDR allow/deny), host (share host network), none (no connectivity).
+Filter mode needs no root and no reserved host subnets. The userspace helper
+is pasta.
 Default policy is allow: public egress is accepted. The ``internal`` and
 ``localhost`` deny presets reject private ranges (RFC1918/ULA) and loopback.
-Host loopback is additionally blocked by pasta/slirp. policy deny rejects every
+Host loopback is additionally blocked by pasta. policy deny rejects every
 destination that is not listed in allow. The chain policy stays drop because a
 base chain cannot use reject as its policy.
 
@@ -160,11 +159,10 @@ Directory symbolic links are always followed the same way. Overlay modes
 cannot be used on a file symlink. A bind table may set symlink =
 "follow" | "preserve" | "error" to override the global default.
 
-network: Global network settings (mode, backend, policy, allow, deny,
-allow_presets, deny_presets). backend is pasta (default) or slirp4netns
-(alias slirp) and selects the filter-mode userspace helper; there is no
-fallback to the other binary. Optional [network.presets] defines custom
-named lists used by either allow_presets or deny_presets. See example.
+network: Global network settings (mode, policy, allow, deny, allow_presets,
+deny_presets). Filter mode always uses pasta. Optional [network.presets]
+defines custom named lists used by either allow_presets or deny_presets. See
+example.
 
 binds: List of additional bind mounts for the sandbox. Each table has exactly
 one of "source" (one host path), "glob" (a shell-style pattern matching files
@@ -208,18 +206,17 @@ exclusive with the raw docker and docker-instance features.
 
 docker_instance: Optional table for the docker-instance feature (project-local
 rootless dockerd). Keys: data_root (default under XDG_DATA_HOME), fs
-(host|project|data), fs_allow, net (host|userspace|none), net_backend
-(slirp4netns default, or pasta / slirp), proxy (default true),
+(host|project|data), fs_allow, net (host|userspace|none; userspace uses
+pasta), proxy (default true),
 remove_data_on_teardown (default false; wipe data_root when the sandbox exits),
 storage_driver (auto|overlay2|fuse-overlayfs|vfs; auto omits dockerd's flag),
 and nested [docker_instance.policy] (same shape as docker_proxy, with instance
 defaults that allow build and images=["*"]). `bk docker-instance list` shows
 per-project store sizes; `bk docker-instance prune` deletes them. Mutually
 exclusive with docker and docker-proxy. Override remove_data_on_teardown for one
-run with --docker-instance-remove-data / --keep-docker-instance-data, the
-storage driver with --docker-instance-storage-driver, and the userspace helper
-with --docker-instance-net-backend. Switching drivers on a non-empty data_root
-needs prune first.
+run with --docker-instance-remove-data / --keep-docker-instance-data, and the
+storage driver with --docker-instance-storage-driver. Switching drivers on a
+non-empty data_root needs prune first.
 
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
@@ -230,7 +227,6 @@ needs prune first.
 \b
   [network]
   mode = "filter"
-  backend = "pasta"  # or slirp4netns (alias: slirp)
   # Default is "allow" (public egress; private and loopback stay denied).
   policy = "deny"
   allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
@@ -433,13 +429,6 @@ def cli() -> None:
     "by allow/deny/policy options when mode is omitted.",
 )
 @click.option(
-    "--net-backend",
-    type=click.Choice(["pasta", "slirp4netns", "slirp"], case_sensitive=False),
-    default=None,
-    help="Userspace helper for filter mode: pasta (default) or slirp4netns "
-    "(alias: slirp). The other helper is not tried if this one is missing.",
-)
-@click.option(
     "--net-policy",
     type=click.Choice(["allow", "deny"], case_sensitive=False),
     default=None,
@@ -482,13 +471,6 @@ def cli() -> None:
     help="dockerd --storage-driver for docker-instance. auto (default) leaves "
     "the choice to dockerd. Overlay2 and fuse-overlayfs cannot share a "
     "data_root; prune before switching.",
-)
-@click.option(
-    "--docker-instance-net-backend",
-    type=click.Choice(["pasta", "slirp4netns", "slirp"], case_sensitive=False),
-    default=None,
-    help="rootlesskit userspace helper for docker-instance (slirp4netns "
-    "default, or pasta / slirp). The other helper is not tried.",
 )
 @click.option(
     "--dbus-see",
@@ -536,7 +518,6 @@ def run(
     enable_features: tuple[str, ...],
     disable_features: tuple[str, ...],
     network_mode: str | None,
-    net_backend: str | None,
     net_policy: str | None,
     net_allow: tuple[str, ...],
     net_deny: tuple[str, ...],
@@ -544,7 +525,6 @@ def run(
     net_deny_preset: tuple[str, ...],
     docker_instance_remove_data: bool | None,
     docker_instance_storage_driver: str | None,
-    docker_instance_net_backend: str | None,
     dbus_see: tuple[str, ...],
     dbus_talk: tuple[str, ...],
     dbus_own: tuple[str, ...],
@@ -576,7 +556,6 @@ def run(
         config,
         executable=executable,
         mode=network_mode,
-        backend=net_backend,
         policy=net_policy,
         allow=net_allow,
         deny=net_deny,
@@ -603,7 +582,6 @@ def run(
         instance_cli_overrides(
             remove_data_on_teardown=docker_instance_remove_data,
             storage_driver=docker_instance_storage_driver,
-            net_backend=docker_instance_net_backend,
         ),
         dbus_proxy_cli_context(
             executable=executable,
@@ -649,10 +627,9 @@ def run(
         if debug_on:
             log_cmdline(bwrap_args, label="bwrap")
             log.debug(
-                "network mode=%s backend=%s policy=%s allow=%s deny=%s "
+                "network mode=%s policy=%s allow=%s deny=%s "
                 "allow_hosts=%s deny_hosts=%s",
                 net.mode,
-                net.backend,
                 net.policy,
                 net.allow,
                 net.deny,
@@ -1190,7 +1167,6 @@ def effective_config(
 
     network_table: dict[str, object] = {
         "mode": net.mode,
-        "backend": net.backend,
         "policy": net.policy,
         "allow": list(net.allow),
         "deny": list(net.deny),
@@ -1320,7 +1296,7 @@ def format_active_info(
     if isinstance(network, Mapping):
         lines.append("")
         lines.append("network:")
-        for key in ("mode", "backend", "policy"):
+        for key in ("mode", "policy"):
             if key in network:
                 lines.append(f"  {key}: {_info_inline(network[key])}")
         for key in (

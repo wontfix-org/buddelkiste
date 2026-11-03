@@ -1,4 +1,4 @@
-"""Extra filter-mode e2e cases against real pasta/slirp + nft."""
+"""Extra filter-mode e2e cases against real pasta + nft."""
 
 from __future__ import annotations
 

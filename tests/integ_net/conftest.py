@@ -7,15 +7,9 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture(params=["pasta", "slirp4netns"])
-def filter_backend(request: pytest.FixtureRequest) -> str:
-    """Run each filter-mode test once per userspace backend."""
-    return request.param
-
-
 @pytest.fixture
-def run_bk(integ_workspace: dict[str, Path], filter_backend: str):
-    """Run ``bk run`` with ``--net-backend`` pinned to this param."""
+def run_bk(integ_workspace: dict[str, Path]):
+    """Run ``bk run`` in filter mode (pasta)."""
     import subprocess
 
     def _run(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -28,8 +22,6 @@ def run_bk(integ_workspace: dict[str, Path], filter_backend: str):
                 "-m",
                 "buddelkiste",
                 "run",
-                "--net-backend",
-                filter_backend,
                 *args,
             ],
             cwd=integ_workspace["work"],

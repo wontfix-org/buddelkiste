@@ -16,7 +16,7 @@ provision:
     user="{{.User}}"
     core=(
       python git rsync curl ca-certificates
-      bubblewrap passt slirp4netns nftables shadow
+      bubblewrap passt nftables shadow
     )
     extra=(docker docker-buildx rootlesskit fuse-overlayfs)
     missing=()

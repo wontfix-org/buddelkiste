@@ -69,7 +69,6 @@ def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
 def test_resolve_network_defaults() -> None:
     net = resolve_network({})
     assert net.mode == "filter"
-    assert net.backend == "pasta"
     assert net.policy == "allow"
     assert net.allow == []
     assert "10.0.0.0/8" in net.deny
@@ -103,27 +102,9 @@ def test_resolve_network_implies_filter_from_config_without_mode() -> None:
     assert policy_only.policy == "allow"
 
 
-def test_resolve_network_backend_config_and_cli(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
-    assert resolve_network({}).backend == "pasta"
-    assert resolve_network({"network": {"backend": "slirp4netns"}}).backend == (
-        "slirp4netns"
-    )
-    assert resolve_network({"network": {"backend": "slirp"}}).backend == "slirp4netns"
-    assert resolve_network({}, backend="slirp4netns").backend == "slirp4netns"
-    assert resolve_network(
-        {"network": {"backend": "pasta"}},
-        backend="slirp",
-    ).backend == "slirp4netns"
-    monkeypatch.setenv("BUDDELKISTE_NET_HELPER", "slirp4netns")
-    assert resolve_network({}).backend == "slirp4netns"
-    assert resolve_network({"network": {"backend": "pasta"}}).backend == "pasta"
-    with pytest.raises(click.ClickException, match="network.backend"):
-        resolve_network({"network": {"backend": "wireguard"}})
-    with pytest.raises(click.ClickException, match="--net-backend"):
-        resolve_network({}, backend="wireguard")
+def test_resolve_network_rejects_backend_key() -> None:
+    with pytest.raises(click.ClickException, match="no longer supported"):
+        resolve_network({"network": {"backend": "pasta"}})
 
 
 def test_resolve_network_explicit_mode_wins() -> None:
@@ -300,13 +281,13 @@ def test_build_nft_ruleset_punches_published_port_gateway() -> None:
     assert "169.254.255.254/32" in rules
     assert chain.index("tcp dport @fwd_ports accept") < chain.index("@deny4 reject")
 
-    slirp = build_nft_ruleset(
+    covered = build_nft_ruleset(
         NetworkConfig(mode="filter", policy="allow", deny=["10.0.0.0/8"]),
         port_gateway="10.0.2.2",
     )
-    assert slirp.count("10.0.0.0/8") == 1
-    assert "10.0.2.2/32" not in slirp
-    assert "ip daddr 10.0.2.2 tcp dport @fwd_ports accept" in slirp
+    assert covered.count("10.0.0.0/8") == 1
+    assert "10.0.2.2/32" not in covered
+    assert "ip daddr 10.0.2.2 tcp dport @fwd_ports accept" in covered
 
 
 def test_build_nft_ruleset_denylist_policy_allow() -> None:
@@ -381,7 +362,6 @@ def test_run_bwrap_none_no_share_net(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     def which(name: str):
         return {
             "nft": "/usr/bin/nft",
@@ -394,7 +374,6 @@ def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
     def which(name: str):
         return {
@@ -441,7 +420,6 @@ def _pasta_which(name: str) -> str | None:
 def test_run_bwrap_filter_pasta_debug_tty(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     monkeypatch.setenv("BUDDELKISTE_DEBUG", "1")
     monkeypatch.setattr("buddelkiste.network.sys.stderr.isatty", lambda: True)
     monkeypatch.setattr("buddelkiste.network.which", _pasta_which)
@@ -477,7 +455,6 @@ def test_run_bwrap_filter_pasta_debug_tty(
 def test_run_bwrap_filter_pasta_debug_log_file(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     monkeypatch.setenv("BUDDELKISTE_DEBUG", "1")
     monkeypatch.setattr("buddelkiste.network.sys.stderr.isatty", lambda: False)
     monkeypatch.setattr("buddelkiste.network.which", _pasta_which)
@@ -514,13 +491,13 @@ def _relay_pipe(label: str, payload: bytes) -> threading.Thread:
 def test_relay_debug_stream_prefixes_lines(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.DEBUG, logger="buddelkiste"):
         pasta = _relay_pipe("pasta", b"from-pasta\n")
-        slirp = _relay_pipe("slirp4netns", b"tap ready\n")
+        nft = _relay_pipe("nft", b"rules installed\n")
         pasta.join(timeout=2)
-        slirp.join(timeout=2)
+        nft.join(timeout=2)
     assert pasta.is_alive() is False
-    assert slirp.is_alive() is False
+    assert nft.is_alive() is False
     assert "pasta: from-pasta" in caplog.text
-    assert "slirp4netns: tap ready" in caplog.text
+    assert "nft: rules installed" in caplog.text
 
 
 def test_relay_debug_file_prefixes_lines(
@@ -543,7 +520,6 @@ def test_relay_debug_file_prefixes_lines(
 def test_run_bwrap_filter_maps_host_loopback_for_docker_ports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BUDDELKISTE_NET_HELPER", raising=False)
     monkeypatch.delenv("BUDDELKISTE_DEBUG", raising=False)
 
     def which(name: str):

@@ -247,7 +247,7 @@ def test_open_reverts_nft_when_bind_fails(
     port = holder.getsockname()[1]
     nft: list[tuple[str, int]] = []
     monkeypatch.setattr(pp, "_nft_element", lambda action, bound: nft.append((action, bound)))
-    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
     try:
         with caplog.at_level(logging.DEBUG):
             relay._open(port)
@@ -274,7 +274,7 @@ def test_close_swallows_socket_errors(monkeypatch: pytest.MonkeyPatch) -> None:
             raise OSError("boom")
 
     monkeypatch.setattr(pp, "_nft_element", lambda *_args: None)
-    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
     assert relay.sock_path == "/run/docker.sock"
     relay._listeners[4] = _Boom()  # type: ignore[assignment]
     relay._close(4)
@@ -285,7 +285,7 @@ def test_accept_ignores_timeouts_until_stop() -> None:
     srv = _bind_ephemeral()
     srv.listen(1)
     srv.settimeout(0.01)
-    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
 
     def stop_soon() -> None:
         time.sleep(0.05)
@@ -302,7 +302,7 @@ def test_accept_returns_when_listener_closes() -> None:
     srv = _bind_ephemeral()
     srv.listen(1)
     srv.settimeout(2)
-    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
 
     def close_soon() -> None:
         time.sleep(0.05)
@@ -354,7 +354,7 @@ def test_stop_closes_listeners_and_ignores_close_errors(monkeypatch: pytest.Monk
             super().close()
 
     monkeypatch.setattr(pp, "_nft_element", lambda *_args: None)
-    relay = _Idle("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = _Idle("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
     live = _Tracked()
     live.bind(("127.0.0.1", 0))
     live.listen(1)
@@ -468,7 +468,7 @@ def test_relay_closes_client_when_gateway_connect_fails(
     monkeypatch.setattr(pp.socket, "create_connection", fail_gateway)
     body = json.dumps([{"Ports": [{"Type": "tcp", "PublicPort": port}]}]).encode()
     monkeypatch.setattr(pp, "_http_get", lambda *_args, **_kwargs: body)
-    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.SLIRP_PORT_GATEWAY)
+    relay = pp.PublishedPortRelay("unix:///run/docker.sock", pp.PASTA_PORT_GATEWAY)
     relay.start()
     client: socket.socket | None = None
     try:
