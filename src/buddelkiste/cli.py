@@ -63,10 +63,12 @@ Host loopback is additionally blocked by pasta. policy deny rejects every
 destination that is not listed in allow. The chain policy stays drop because a
 base chain cannot use reject as its policy.
 
-In filter mode, a resolv.conf that is only a loopback stub is relayed to that
-stub from the host netns, so systemd-resolved keeps split-DNS and chooses the
-uplinks. Other nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
-keeps working under policy deny. Rules may be IP/CIDR literals or hostnames
+In filter mode, the hosts: line must be one the DNS proxy can follow.
+systemd-resolved (module resolve, with 127.0.0.53 accepting connections) is
+relayed from the host netns, so it keeps split-DNS and chooses the uplinks.
+The glibc dns module uses /etc/resolv.conf: a leading loopback resolver is
+relayed, and other nameserver addresses are auto-allowed. Any other hosts
+module aborts filter mode. Rules may be IP/CIDR literals or hostnames
 (exact or *.suffix); hostnames use a DNS proxy that publishes resolved
 A/AAAA addresses into dynamic nft sets. Named presets (internal, private,
 localhost, linklocal, metadata, plus custom names under [network.presets])

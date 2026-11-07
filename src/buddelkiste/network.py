@@ -19,12 +19,13 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from io import BufferedIOBase
 from pathlib import Path
@@ -573,22 +574,295 @@ def stub_nameserver(path: Path | None = None) -> str | None:
     return loopback
 
 
+# systemd-resolved still serves this stub when NetworkManager leaves
+# /etc/resolv.conf without nameserver lines and nsswitch uses ``resolve``.
+RESOLVED_STUB_RESOLV = Path("/run/systemd/resolve/stub-resolv.conf")
+
+
+def relay_stub_address(
+    resolv: Path | None = None,
+    *,
+    resolved_stub: Path | None = None,
+) -> str | None:
+    """Loopback resolver the host netns should relay sandbox DNS to.
+
+    ``/etc/resolv.conf`` wins when it lists only a loopback stub. A file with
+    no nameserver lines is the NetworkManager + nss-resolve layout: glibc
+    never dials that file, and systemd-resolved's stub
+    (``/run/systemd/resolve/stub-resolv.conf``) is the resolver that holds
+    the uplink list. A resolv.conf that already names a non-loopback server
+    is left alone.
+    """
+    resolv_path = resolv or Path("/etc/resolv.conf")
+    stub = stub_nameserver(resolv_path)
+    if stub is not None:
+        return stub
+    if resolv_conf_nameservers(resolv_path):
+        return None
+    stub_path = resolved_stub if resolved_stub is not None else RESOLVED_STUB_RESOLV
+    if not stub_path.is_file():
+        return None
+    return stub_nameserver(stub_path)
+
+
+# systemd-resolved's DNS stub. The resolve NSS module is usable for the proxy
+# only when this address accepts TCP/53 in the host netns.
+RESOLVED_STUB_HOST = "127.0.0.53"
+
+_NSS_STATUSES = ("success", "notfound", "unavail", "tryagain")
+_LOCAL_HOSTS_MODULES = frozenset({"files", "myhostname", "mymachines"})
+_MDNS_MINIMAL_MODULES = frozenset({"mdns4_minimal", "mdns_minimal"})
+_HOSTS_TOKEN_RE = re.compile(r"\[[^\]]*\]|\S+")
+
+
+@dataclass(frozen=True)
+class DnsUpstream:
+    """Where sandbox DNS queries go after the in-netns proxy.
+
+    ``relay`` is a loopback resolver dialed from the host netns. ``forward``
+    is the routable list dialed from the sandbox. Exactly one is set.
+    """
+
+    relay: str | None = None
+    forward: tuple[str, ...] = ()
+
+
+def _nss_default_actions() -> dict[str, str]:
+    return {
+        "success": "return",
+        "notfound": "continue",
+        "unavail": "continue",
+        "tryagain": "continue",
+    }
+
+
+def _apply_nss_action(actions: dict[str, str], spec: str) -> None:
+    text = spec.strip()
+    if "=" not in text:
+        return
+    negate = text.startswith("!")
+    body = text[1:] if negate else text
+    status, action = body.split("=", 1)
+    status = status.strip().lower()
+    action = action.strip().lower()
+    if negate:
+        for name in _NSS_STATUSES:
+            if name != status:
+                actions[name] = action
+        return
+    actions[status] = action
+
+
+def _parse_nss_actions(bracket: str) -> dict[str, str]:
+    actions = _nss_default_actions()
+    inner = bracket[1:-1] if bracket.startswith("[") and bracket.endswith("]") else bracket
+    for spec in inner.split():
+        _apply_nss_action(actions, spec)
+    return actions
+
+
+def hosts_nss_modules(text: str) -> tuple[str, list[tuple[str, dict[str, str]]]] | None:
+    """Return the first ``hosts:`` line and its modules.
+
+    ``None`` when the file has no hosts line. A ``[STATUS=ACTION]`` group
+    belongs to the module before it. Actions left unspecified keep glibc's
+    defaults (``success`` returns, every other status continues).
+    """
+    logical = ""
+    continued = False
+    found = False
+    for raw in text.splitlines():
+        if continued:
+            logical = f"{logical} {raw.strip()}"
+        else:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not stripped.startswith("hosts:"):
+                continue
+            logical = stripped
+            found = True
+        continued = logical.endswith("\\")
+        if continued:
+            logical = logical[:-1].rstrip()
+            continue
+        break
+    if not found or continued:
+        return None
+    rest = logical.split(":", 1)[1]
+    modules: list[tuple[str, dict[str, str]]] = []
+    for token in _HOSTS_TOKEN_RE.findall(rest):
+        if token.startswith("#"):
+            break
+        if token.startswith("["):
+            if not modules:
+                raise click.ClickException(f"nsswitch hosts action before a module: {logical}")
+            name, _previous = modules[-1]
+            modules[-1] = (name, _parse_nss_actions(token))
+            continue
+        modules.append((token, _nss_default_actions()))
+    return logical, modules
+
+
+def _dns_port_open(host: str) -> bool:
+    try:
+        with socket.create_connection((host, 53), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _resolv_host_addresses(path: Path) -> list[str]:
+    ips: list[str] = []
+    for cidr in resolv_conf_nameservers(path):
+        net = ipaddress.ip_network(cidr, strict=False)
+        host_route = (net.version == 4 and net.prefixlen == 32) or (
+            net.version == 6 and net.prefixlen == 128
+        )
+        if host_route:
+            ips.append(str(net.network_address))
+    return ips
+
+
+def resolv_conf_search_lines(path: Path | None = None) -> list[str]:
+    """``search`` and ``domain`` lines from resolv.conf, in file order."""
+    resolv = path or Path("/etc/resolv.conf")
+    try:
+        lines = resolv.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    found: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        kind = stripped.split(maxsplit=1)[0]
+        if kind in {"search", "domain"}:
+            found.append(stripped)
+    return found
+
+
+def proxy_resolv_text(*, include_search: bool, resolv: Path | None = None) -> str:
+    """resolv.conf for the sandbox DNS proxy listener on 127.0.0.1.
+
+    Search domains are copied only when the proxy dials public upstreams.
+    A host stub or dnsmasq applies its own search list to the relayed query.
+    """
+    lines = ["nameserver 127.0.0.1"]
+    if include_search:
+        lines.extend(resolv_conf_search_lines(resolv))
+    lines.append("options attempts:1 timeout:4")
+    return "\n".join(lines) + "\n"
+
+
+def _abort_hosts(line: str, module: str) -> None:
+    raise click.ClickException(
+        f"unsupported hosts module {module!r} in {line!r}. Filter mode can relay "
+        "a live systemd-resolved stub (127.0.0.53) or follow the glibc dns module "
+        "via /etc/resolv.conf."
+    )
+
+
+def _upstream_from_resolv(path: Path, probe: Callable[[str], bool]) -> DnsUpstream:
+    addrs = _resolv_host_addresses(path)
+    if not addrs:
+        raise click.ClickException(f"glibc dns has no usable nameserver in {path}")
+    if ipaddress.ip_address(addrs[0]).is_loopback:
+        if not probe(addrs[0]):
+            raise click.ClickException(
+                f"loopback nameserver {addrs[0]} in {path} is not accepting DNS"
+            )
+        return DnsUpstream(relay=addrs[0])
+    forward = tuple(addr for addr in addrs if not ipaddress.ip_address(addr).is_loopback)
+    if not forward:
+        raise click.ClickException(f"glibc dns has no routable nameserver in {path}")
+    return DnsUpstream(forward=forward)
+
+
+def plan_dns_upstream(
+    nsswitch: Path | None = None,
+    resolv: Path | None = None,
+    *,
+    stub_open: Callable[[str], bool] | None = None,
+) -> DnsUpstream:
+    """Choose the sandbox DNS upstream from the host ``hosts:`` line.
+
+    Walk modules in order. ``files``, ``myhostname``, and ``mymachines`` are
+    local and skipped. ``resolve`` relays to ``127.0.0.53`` when that stub
+    accepts a connection; ``[!UNAVAIL=return]`` continues when it does not.
+    ``dns`` uses ``/etc/resolv.conf`` (a leading loopback address is a relay,
+    otherwise the routable addresses). ``mdns4_minimal`` and ``mdns_minimal``
+    warn and continue. Any other module aborts filter mode.
+
+    A missing nsswitch file or a file with no ``hosts:`` line is glibc's
+    built-in ``dns`` path.
+    """
+    nss_path = nsswitch or Path("/etc/nsswitch.conf")
+    resolv_path = resolv or Path("/etc/resolv.conf")
+    probe = stub_open if stub_open is not None else _dns_port_open
+    try:
+        text = nss_path.read_text(encoding="utf-8")
+    except OSError:
+        parsed = None
+    else:
+        parsed = hosts_nss_modules(text)
+    if parsed is None:
+        modules_line = "hosts: dns"
+        modules: list[tuple[str, dict[str, str]]] = [("dns", _nss_default_actions())]
+    else:
+        modules_line, modules = parsed
+
+    warned_mdns = False
+    for name, actions in modules:
+        if name in _LOCAL_HOSTS_MODULES:
+            continue
+        if name in _MDNS_MINIMAL_MODULES:
+            if actions.get("unavail") != "continue":
+                _abort_hosts(modules_line, name)
+            if not warned_mdns:
+                log.warning(
+                    "nsswitch module %s is not proxied; .local names will not "
+                    "resolve in the sandbox",
+                    name,
+                )
+                warned_mdns = True
+            continue
+        if name == "resolve":
+            if probe(RESOLVED_STUB_HOST):
+                return DnsUpstream(relay=RESOLVED_STUB_HOST)
+            if actions.get("unavail") == "continue":
+                continue
+            raise click.ClickException(
+                "systemd-resolved stub 127.0.0.53:53 is not accepting connections, "
+                f"and {modules_line!r} does not fall through on unavail"
+            )
+        if name == "dns":
+            return _upstream_from_resolv(resolv_path, probe)
+        _abort_hosts(modules_line, name)
+    raise click.ClickException(
+        f"no supported DNS module in {modules_line!r}. Filter mode relays "
+        "systemd-resolved's stub or follows the glibc dns module."
+    )
+
+
 # Passed to the filter child: Unix socket of a relay running in the host netns.
 DNS_RELAY_ENV = "BUDDELKISTE_DNS_RELAY"
 
 
 def start_host_dns_relay(directory: Path) -> HostDnsRelay | None:
-    """Relay sandbox DNS to the host stub resolver, when resolv.conf is one.
+    """Relay sandbox DNS to a host loopback resolver, when ``hosts:`` asks for one.
 
     The listener stays in this process, which is still in the host netns, so
-    it can dial ``127.0.0.53``. The guest only sees the socket path.
+    it can dial ``127.0.0.53`` or another loopback nameserver. The guest only
+    sees the socket path. Raises ``click.ClickException`` when the hosts line
+    is not a live resolved stub or the glibc ``dns`` module.
     """
-    stub = stub_nameserver()
-    if stub is None:
+    upstream = plan_dns_upstream()
+    if upstream.relay is None:
         return None
-    relay = HostDnsRelay(directory / "dns.sock", stub)
+    relay = HostDnsRelay(directory / "dns.sock", upstream.relay)
     relay.start()
-    log.debug("DNS relay %s -> %s:53", relay.path, stub)
+    log.debug("DNS relay %s -> %s:53", relay.path, upstream.relay)
     return relay
 
 
@@ -877,8 +1151,9 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str]) -> int:
         # Hostname rules need the proxy so answers can update nft. A resolv.conf
         # that is only the systemd stub cannot be dialed from this netns; the
         # parent relays that socket to 127.0.0.53 and systemd-resolved chooses
-        # the uplinks.
-        use_proxy = net.needs_dns_proxy or not sandbox_nameservers()
+        # the uplinks. The relay is also set when hosts: uses resolve even if
+        # resolv.conf lists public addresses those lookups never dial.
+        use_proxy = bool(relay) or net.needs_dns_proxy or not sandbox_nameservers()
         if use_proxy:
             if relay:
                 upstreams = [relay]
@@ -920,7 +1195,7 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str]) -> int:
                 prefix="bk-resolv-",
                 delete=False,
             ) as fh:
-                fh.write("nameserver 127.0.0.1\noptions attempts:1 timeout:4\n")
+                fh.write(proxy_resolv_text(include_search=not relay))
                 resolv_override = Path(fh.name)
             bwrap_args = _replace_ro_bind_target(
                 bwrap_args, "/etc/nsswitch.conf", str(nsswitch_override)
